@@ -16,8 +16,9 @@ make windows
 ```
 
 Native Windows artifacts are produced with the repository's MinGW cross-build.
-Native macOS `.app` bundles are built on macOS with `make macos`; GitHub CI
-verifies both macOS 14 and 15. Neither development artifact is approved for
+Universal macOS `.app` bundles containing both Apple Silicon and Intel slices
+are built on macOS with `make macos`; GitHub CI verifies both macOS 14 and 15.
+Neither development artifact is approved for
 public distribution until its platform signing gate is complete.
 
 Real M-Lab execution is disabled in ordinary development builds. It additionally

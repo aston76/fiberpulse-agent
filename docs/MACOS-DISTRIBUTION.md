@@ -14,8 +14,9 @@ chmod +x packaging/macos/build-app.sh
 packaging/macos/build-app.sh
 ```
 
-The script creates an ad-hoc-signed `.app` and a ZIP for internal testing. Public
-distribution remains blocked until a Developer ID Application certificate,
+The script cross-builds both `arm64` and `x86_64`, combines them with `lipo`,
+then creates an ad-hoc-signed universal `.app` and ZIP for internal testing.
+Public distribution remains blocked until a Developer ID Application certificate,
 hardened-runtime signing, notarization and stapling are configured. An ad-hoc
 signature is never presented as a public release signature.
 

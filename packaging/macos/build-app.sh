@@ -4,6 +4,28 @@ set -eu
 version="${FIBERPULSE_VERSION:-0.1.0-dev}"
 output_root="${1:-dist/macos}"
 app_path="${output_root}/FiberPulse.app"
+deployment_target="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
+build_root="$(mktemp -d "${TMPDIR:-/tmp}/fiberpulse-macos-build.XXXXXX")"
+
+cleanup() {
+  rm -rf "$build_root"
+}
+trap cleanup EXIT HUP INT TERM
+
+build_binary() {
+  output_path="$1"
+  package_path="$2"
+  linker_flags="$3"
+  CGO_ENABLED=1 \
+    GOOS=darwin \
+    GOARCH="$goarch" \
+    CC=clang \
+    CXX=clang++ \
+    MACOSX_DEPLOYMENT_TARGET="$deployment_target" \
+    CGO_CFLAGS="-arch $clang_arch -mmacosx-version-min=$deployment_target" \
+    CGO_LDFLAGS="-arch $clang_arch -mmacosx-version-min=$deployment_target" \
+    go build -trimpath -buildvcs=false -ldflags="$linker_flags" -o "$output_path" "$package_path"
+}
 
 if [ -e "$app_path" ]; then
   echo "Refusing to overwrite existing app bundle: $app_path" >&2
@@ -11,8 +33,21 @@ if [ -e "$app_path" ]; then
 fi
 
 mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
-CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=$version" -o "$app_path/Contents/MacOS/fiberpulse" ./cmd/fiberpulse
-CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags="-s -w" -o "$app_path/Contents/MacOS/fiberpulse-updater" ./cmd/fiberpulse-updater
+for goarch in arm64 amd64; do
+  case "$goarch" in
+    arm64) clang_arch="arm64" ;;
+    amd64) clang_arch="x86_64" ;;
+    *) echo "Unsupported macOS architecture: $goarch" >&2; exit 1 ;;
+  esac
+  arch_root="$build_root/$goarch"
+  mkdir -p "$arch_root"
+  build_binary "$arch_root/fiberpulse" ./cmd/fiberpulse "-s -w -X main.version=$version"
+  build_binary "$arch_root/fiberpulse-updater" ./cmd/fiberpulse-updater "-s -w"
+done
+lipo -create "$build_root/arm64/fiberpulse" "$build_root/amd64/fiberpulse" -output "$app_path/Contents/MacOS/fiberpulse"
+lipo -create "$build_root/arm64/fiberpulse-updater" "$build_root/amd64/fiberpulse-updater" -output "$app_path/Contents/MacOS/fiberpulse-updater"
+lipo -verify_arch arm64 x86_64 "$app_path/Contents/MacOS/fiberpulse"
+lipo -verify_arch arm64 x86_64 "$app_path/Contents/MacOS/fiberpulse-updater"
 cp packaging/macos/Info.plist "$app_path/Contents/Info.plist"
 cp packaging/macos/FiberPulse.icns "$app_path/Contents/Resources/FiberPulse.icns"
 cp LICENSE "$app_path/Contents/Resources/LICENSE"
