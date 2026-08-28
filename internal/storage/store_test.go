@@ -46,3 +46,35 @@ func TestStorePersistsConsentQuotaAndMeasurement(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLegacyDevelopmentMeasurementsBecomeLocalOnlyOnOpen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fiberpulse.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	r := measurement.Result{ID: "legacy-fake", Provider: measurement.ProviderDevelopmentFake, ProtocolVersion: "fake-v1", ClientVersion: "dev", SchemaVersion: measurement.SchemaVersion, MethodologyVersion: measurement.MethodologyVersion, ConfidenceVersion: measurement.ConfidenceVersion, StartedAt: now, CompletedAt: now.Add(time.Second), Status: measurement.StatusComplete, ConfidenceLevel: "high", ConfidenceScore: 100, PublicEligible: true}
+	if err := s.SaveResult(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	results, err := s.ListResults(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].PublicEligible {
+		t.Fatalf("legacy development result remained eligible: %+v", results)
+	}
+	if len(results[0].ConfidenceReasons) != 1 || results[0].ConfidenceReasons[0] != "provider.not_public" {
+		t.Fatalf("legacy development result lacks reason: %+v", results[0].ConfidenceReasons)
+	}
+}
