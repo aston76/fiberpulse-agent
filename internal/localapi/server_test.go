@@ -108,6 +108,18 @@ func TestBootstrapSessionHostAndCSRF(t *testing.T) {
 	if disposition := response.Header.Get("Content-Disposition"); disposition != "attachment; filename=fiberpulse-report.csv" {
 		t.Fatalf("unexpected content disposition %q", disposition)
 	}
+	faviconURL := server.BaseURL() + "/assets/fiberpulse-mark.png"
+	request, _ = http.NewRequest(http.MethodGet, faviconURL, nil)
+	request.AddCookie(cookies[0])
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	favicon, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/png" || len(favicon) == 0 {
+		t.Fatalf("favicon status=%d type=%q bytes=%d", response.StatusCode, response.Header.Get("Content-Type"), len(favicon))
+	}
 	parsed, _ := url.Parse(statusURL)
 	request, _ = http.NewRequest(http.MethodGet, statusURL, nil)
 	request.Host = "attacker.invalid"
