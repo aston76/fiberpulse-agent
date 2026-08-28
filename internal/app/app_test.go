@@ -407,6 +407,46 @@ func TestIncidentLifecyclePersistsAcrossRestartAndCanBeDismissed(t *testing.T) {
 	}
 }
 
+func TestConnectivityHysteresisPersistsAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fiberpulse.db")
+	first, err := New(Config{Version: "test", DatabasePath: path, Provider: &measurement.FakeProvider{Delay: time.Millisecond}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	usable := health.Sample{At: base, State: string(health.ConnectivityInternetUsable), Category: "healthy", Network: measurement.NetworkContext{Online: true}}
+	offline := health.Sample{At: base.Add(time.Minute), State: string(health.ConnectivityOffline), Category: "internet_reachability"}
+	if err := first.processHealthSample(ctx, usable); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.processHealthSample(ctx, offline); err != nil {
+		t.Fatal(err)
+	}
+	if state := first.connectivity.State(); state != health.ConnectivityUnstable {
+		t.Fatalf("state before restart=%s", state)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := New(Config{Version: "test", DatabasePath: path, Provider: &measurement.FakeProvider{Delay: time.Millisecond}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if state := second.connectivity.State(); state != health.ConnectivityUnstable {
+		t.Fatalf("state after restart=%s", state)
+	}
+	offline.At = base.Add(2 * time.Minute)
+	if err := second.processHealthSample(ctx, offline); err != nil {
+		t.Fatal(err)
+	}
+	if state := second.connectivity.State(); state != health.ConnectivityOffline {
+		t.Fatalf("confirmed state=%s", state)
+	}
+}
+
 func TestSnapshotIncludesPersonalBaseline(t *testing.T) {
 	a := newTestApp(t)
 	ctx := context.Background()

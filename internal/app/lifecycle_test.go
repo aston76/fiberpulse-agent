@@ -37,6 +37,12 @@ func TestHealthTransitionsMonitoringAndDegraded(t *testing.T) {
 	if err := a.processHealthSample(t.Context(), healthSample("internet_usable")); err != nil {
 		t.Fatal(err)
 	}
+	if a.lifecycle.State != LifecycleDegraded {
+		t.Fatalf("single recovery observation bypassed hysteresis: state=%s", a.lifecycle.State)
+	}
+	if err := a.processHealthSample(t.Context(), healthSample("internet_usable")); err != nil {
+		t.Fatal(err)
+	}
 	if a.lifecycle.State != LifecycleMonitoring {
 		t.Fatalf("state=%s", a.lifecycle.State)
 	}

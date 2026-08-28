@@ -6,11 +6,65 @@ import (
 	"testing"
 	"time"
 
+	"fiberpulse.dev/agent/internal/health"
 	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/reporting"
 	"fiberpulse.dev/agent/internal/scheduler"
 )
+
+func TestPersistHealthRuntimeCommitsSampleAndMachineTogether(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	at := time.Date(2026, 8, 28, 1, 2, 3, 0, time.UTC)
+	sample := health.Sample{At: at, State: string(health.ConnectivityInternetUsable), Category: "healthy", Network: measurement.NetworkContext{Online: true}}
+	runtime := health.ConnectivitySnapshot{State: health.ConnectivityInternetUsable, Stable: health.ConnectivityInternetUsable, LastObservedAt: at}
+	if err := s.PersistHealthRuntime(ctx, sample, "connectivity_runtime_test", runtime); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM health_samples WHERE captured_at=?`, formatTime(at)).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("health count=%d err=%v", count, err)
+	}
+	var stored health.ConnectivitySnapshot
+	found, err := s.GetSetting(ctx, "connectivity_runtime_test", &stored)
+	if err != nil || !found || stored != runtime {
+		t.Fatalf("runtime found=%v stored=%+v err=%v", found, stored, err)
+	}
+}
+
+func TestPersistHealthRuntimeRollsBackBothWrites(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER reject_connectivity_runtime BEFORE INSERT ON settings
+		WHEN NEW.key='connectivity_runtime_rejected'
+		BEGIN SELECT RAISE(ABORT, 'runtime rejected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 8, 28, 1, 2, 3, 0, time.UTC)
+	sample := health.Sample{At: at, State: string(health.ConnectivityOffline), Category: "internet_reachability"}
+	runtime := health.ConnectivitySnapshot{State: health.ConnectivityOffline, Stable: health.ConnectivityOffline, LastObservedAt: at}
+	if err := s.PersistHealthRuntime(ctx, sample, "connectivity_runtime_rejected", runtime); err == nil {
+		t.Fatal("runtime rejection unexpectedly committed")
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM health_samples WHERE captured_at=?`, formatTime(at)).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("health write was not rolled back: count=%d err=%v", count, err)
+	}
+	var stored health.ConnectivitySnapshot
+	found, err := s.GetSetting(ctx, "connectivity_runtime_rejected", &stored)
+	if err != nil || found {
+		t.Fatalf("runtime write was not rolled back: found=%v stored=%+v err=%v", found, stored, err)
+	}
+}
 
 func TestStorePersistsConsentQuotaAndMeasurement(t *testing.T) {
 	ctx := context.Background()

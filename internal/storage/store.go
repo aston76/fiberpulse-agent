@@ -310,10 +310,42 @@ func (s *Store) QueueShare(ctx context.Context, id, eventType string, payload an
 	return err
 }
 
-func (s *Store) SaveHealth(ctx context.Context, sample health.Sample) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO health_samples(captured_at,connectivity_state,gateway_ok,dns_ok,probe_ok,probe_rtt_us,category,detail_code) VALUES(?,?,?,?,?,?,?,?)`,
+type healthExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func saveHealth(ctx context.Context, executor healthExecutor, sample health.Sample) error {
+	_, err := executor.ExecContext(ctx, `INSERT INTO health_samples(captured_at,connectivity_state,gateway_ok,dns_ok,probe_ok,probe_rtt_us,category,detail_code) VALUES(?,?,?,?,?,?,?,?)`,
 		formatTime(sample.At), sample.State, boolInt(sample.Network.Online), boolInt(sample.DNSOK), boolInt(sample.ProbeOK), sample.ProbeRTTUS, sample.Category, sample.DetailCode)
 	return err
+}
+
+func (s *Store) SaveHealth(ctx context.Context, sample health.Sample) error {
+	return saveHealth(ctx, s.db, sample)
+}
+
+func (s *Store) PersistHealthRuntime(ctx context.Context, sample health.Sample, settingKey string, runtime any) error {
+	if settingKey == "" {
+		return errors.New("health runtime setting key is required")
+	}
+	encoded, err := json.Marshal(runtime)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := saveHealth(ctx, tx, sample); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,?)
+		ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`,
+		settingKey, string(encoded), formatTime(time.Now().UTC())); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ShareQueueCount(ctx context.Context) (int, error) {

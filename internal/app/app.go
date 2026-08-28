@@ -27,6 +27,7 @@ import (
 
 const consentPolicyVersion = "privacy-v1"
 const incidentRuntimeSetting = "incident_runtime_v1"
+const connectivityRuntimeSetting = "connectivity_runtime_v1"
 
 var ErrMeasurementBusy = errors.New("a measurement is already running")
 
@@ -41,34 +42,36 @@ type Config struct {
 }
 
 type App struct {
-	config      Config
-	store       *storage.Store
-	inspector   network.Inspector
-	health      health.Checker
-	local       *localapi.Server
-	scheduler   scheduler.Scheduler
-	schedulerMu sync.Mutex
-	sharingMu   sync.Mutex
-	ctx         context.Context
-	cancel      context.CancelFunc
-	mu          sync.RWMutex
-	lifecycle   LifecycleMachine
-	testMachine measurement.TestMachine
-	schedule    scheduler.Machine
-	shareState  sharing.Machine
-	paused      bool
-	nextRun     time.Time
-	lastHealth  health.Sample
-	lastError   string
-	incidentMu  sync.Mutex
-	incident    incidents.Machine
-	current     incidents.Record
-	testMu      sync.Mutex
-	testKind    scheduler.Kind
-	wg          sync.WaitGroup
-	closing     bool
-	closeOnce   sync.Once
-	closeErr    error
+	config       Config
+	store        *storage.Store
+	inspector    network.Inspector
+	health       health.Checker
+	local        *localapi.Server
+	scheduler    scheduler.Scheduler
+	schedulerMu  sync.Mutex
+	sharingMu    sync.Mutex
+	connectMu    sync.Mutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	mu           sync.RWMutex
+	lifecycle    LifecycleMachine
+	testMachine  measurement.TestMachine
+	schedule     scheduler.Machine
+	shareState   sharing.Machine
+	connectivity health.ConnectivityMachine
+	paused       bool
+	nextRun      time.Time
+	lastHealth   health.Sample
+	lastError    string
+	incidentMu   sync.Mutex
+	incident     incidents.Machine
+	current      incidents.Record
+	testMu       sync.Mutex
+	testKind     scheduler.Kind
+	wg           sync.WaitGroup
+	closing      bool
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 type Snapshot struct {
@@ -76,6 +79,7 @@ type Snapshot struct {
 	State             string               `json:"state"`
 	TestState         string               `json:"test_state"`
 	SchedulerState    string               `json:"scheduler_state"`
+	ConnectivityState string               `json:"connectivity_state"`
 	Paused            bool                 `json:"paused"`
 	NextAutomaticTest time.Time            `json:"next_automatic_test,omitempty"`
 	Provider          measurement.Metadata `json:"provider"`
@@ -139,6 +143,20 @@ func New(config Config) (*App, error) {
 		cancel()
 		_ = store.Close()
 		return nil, err
+	}
+	var connectivitySnapshot health.ConnectivitySnapshot
+	found, err := store.GetSetting(context.Background(), connectivityRuntimeSetting, &connectivitySnapshot)
+	if err != nil {
+		cancel()
+		_ = store.Close()
+		return nil, fmt.Errorf("restore connectivity runtime: %w", err)
+	}
+	if found {
+		if err := a.connectivity.Restore(connectivitySnapshot); err != nil {
+			cancel()
+			_ = store.Close()
+			return nil, fmt.Errorf("restore connectivity machine: %w", err)
+		}
 	}
 	return a, nil
 }
@@ -254,9 +272,12 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	personalBaseline := calculateBaseline(results)
+	a.connectMu.Lock()
+	connectivityState := a.connectivity.State()
+	a.connectMu.Unlock()
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return Snapshot{Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
+	return Snapshot{Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), ConnectivityState: string(connectivityState), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
 }
 
 func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) error {
@@ -804,11 +825,25 @@ func (a *App) processHealthSample(ctx context.Context, sample health.Sample) err
 	if sample.At.IsZero() {
 		sample.At = time.Now().UTC()
 	}
+	a.connectMu.Lock()
+	defer a.connectMu.Unlock()
+	previous := a.connectivity.Snapshot()
+	connectivityState, err := a.connectivity.Observe(health.ConnectivityState(sample.State), sample.At)
+	if err != nil {
+		return err
+	}
+	runtime := a.connectivity.Snapshot()
+	if err := a.store.PersistHealthRuntime(ctx, sample, connectivityRuntimeSetting, runtime); err != nil {
+		if restoreErr := a.connectivity.Restore(previous); restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("restore connectivity after persistence failure: %w", restoreErr))
+		}
+		return err
+	}
 	a.mu.Lock()
 	a.lastHealth = sample
 	if a.lifecycle.State == LifecycleMonitoring || a.lifecycle.State == LifecycleDegraded {
 		next := LifecycleMonitoring
-		if sample.State == "offline" || sample.State == "internet_degraded" {
+		if connectivityState == health.ConnectivityOffline || connectivityState == health.ConnectivityInternetDegraded || connectivityState == health.ConnectivityUnstable {
 			next = LifecycleDegraded
 		}
 		if err := a.lifecycle.Transition(next); err != nil {
@@ -817,9 +852,6 @@ func (a *App) processHealthSample(ctx context.Context, sample health.Sample) err
 		}
 	}
 	a.mu.Unlock()
-	if err := a.store.SaveHealth(ctx, sample); err != nil {
-		return err
-	}
 	return a.observeIncident(ctx, sample)
 }
 
