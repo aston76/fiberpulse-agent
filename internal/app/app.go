@@ -38,29 +38,29 @@ type Config struct {
 }
 
 type App struct {
-	config     Config
-	store      *storage.Store
-	inspector  network.Inspector
-	health     health.Checker
-	local      *localapi.Server
-	scheduler  scheduler.Scheduler
-	ctx        context.Context
-	cancel     context.CancelFunc
-	mu         sync.RWMutex
-	state      string
-	testState  string
-	paused     bool
-	nextRun    time.Time
-	lastHealth health.Sample
-	lastError  string
-	incidentMu sync.Mutex
-	incident   incidents.Machine
-	current    incidents.Record
-	testMu     sync.Mutex
-	wg         sync.WaitGroup
-	closing    bool
-	closeOnce  sync.Once
-	closeErr   error
+	config      Config
+	store       *storage.Store
+	inspector   network.Inspector
+	health      health.Checker
+	local       *localapi.Server
+	scheduler   scheduler.Scheduler
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.RWMutex
+	state       string
+	testMachine measurement.TestMachine
+	paused      bool
+	nextRun     time.Time
+	lastHealth  health.Sample
+	lastError   string
+	incidentMu  sync.Mutex
+	incident    incidents.Machine
+	current     incidents.Record
+	testMu      sync.Mutex
+	wg          sync.WaitGroup
+	closing     bool
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 type Snapshot struct {
@@ -100,7 +100,7 @@ func New(config Config) (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	inspector := network.SystemInspector{}
-	a := &App{config: config, store: store, inspector: inspector, ctx: ctx, cancel: cancel, state: "starting", testState: "idle"}
+	a := &App{config: config, store: store, inspector: inspector, ctx: ctx, cancel: cancel, state: "starting", testMachine: measurement.TestMachine{State: measurement.TestIdle}}
 	a.health = health.Checker{Inspector: inspector, DNSName: config.DNSName, ProbeURL: config.ProbeURL}
 	a.scheduler = scheduler.Scheduler{Store: store}
 	a.local = localapi.New(a)
@@ -219,7 +219,7 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 	personalBaseline := calculateBaseline(results)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return Snapshot{Version: a.config.Version, State: a.state, TestState: a.testState, Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
+	return Snapshot{Version: a.config.Version, State: a.state, TestState: string(a.testMachine.State), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
 }
 
 func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) error {
@@ -405,32 +405,76 @@ func (a *App) deleteReport(ctx context.Context, id string) error {
 	return a.store.SaveReport(ctx, report)
 }
 
+func (a *App) transitionTest(next measurement.TestState) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.testMachine.Transition(next)
+}
+
+func (a *App) rejectTestStart(cause error) error {
+	terminal := measurement.TestFailed
+	if errors.Is(cause, context.Canceled) {
+		terminal = measurement.TestCancelled
+	}
+	if err := a.transitionTest(terminal); err != nil {
+		cause = errors.Join(cause, err)
+	}
+	if err := a.transitionTest(measurement.TestIdle); err != nil {
+		cause = errors.Join(cause, err)
+	}
+	return cause
+}
+
+func (a *App) advanceTestProgress(phase string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch measurement.TestState(phase) {
+	case measurement.TestDownload:
+		if a.testMachine.State == measurement.TestDownload {
+			return nil
+		}
+		return a.testMachine.Transition(measurement.TestDownload)
+	case measurement.TestUpload:
+		if a.testMachine.State == measurement.TestUpload {
+			return nil
+		}
+		return a.testMachine.Transition(measurement.TestUpload)
+	default:
+		return fmt.Errorf("unsupported measurement progress phase %q", phase)
+	}
+}
+
 func (a *App) StartTest(ctx context.Context, kind scheduler.Kind) error {
 	a.testMu.Lock()
 	defer a.testMu.Unlock()
 	a.mu.RLock()
-	busy := a.testState != "idle" || a.closing
+	busy := a.testMachine.State != measurement.TestIdle || a.closing
 	networkContext := a.lastHealth.Network
 	a.mu.RUnlock()
 	if busy {
 		return errors.New("a measurement is already running")
 	}
+	if err := a.transitionTest(measurement.TestPreflight); err != nil {
+		return err
+	}
 	consent, err := a.store.CurrentConsent(ctx, "mlab")
 	if err != nil {
-		return err
+		return a.rejectTestStart(err)
 	}
 	preflight, err := a.config.Provider.Preflight(ctx, networkContext, consent.Granted)
 	if err != nil {
-		return err
+		return a.rejectTestStart(err)
 	}
 	if !preflight.Eligible {
-		return measurement.ErrNetworkIneligible
+		return a.rejectTestStart(measurement.ErrNetworkIneligible)
 	}
 	if err := a.scheduler.Reserve(ctx, kind); err != nil {
-		return err
+		return a.rejectTestStart(err)
+	}
+	if err := a.transitionTest(measurement.TestQuotaReserved); err != nil {
+		return a.rejectTestStart(err)
 	}
 	a.mu.Lock()
-	a.testState = "reserved"
 	a.wg.Add(1)
 	a.mu.Unlock()
 	go func() {
@@ -441,11 +485,21 @@ func (a *App) StartTest(ctx context.Context, kind scheduler.Kind) error {
 }
 
 func (a *App) runTest(kind scheduler.Kind, before measurement.NetworkContext) {
+	lifecycleErr := a.transitionTest(measurement.TestLocate)
+	var lifecycleMu sync.Mutex
 	a.mu.Lock()
-	a.testState = "running"
 	a.lastError = ""
 	a.mu.Unlock()
-	result, runErr := a.config.Provider.Run(a.ctx, before, func(p measurement.Progress) { a.mu.Lock(); a.testState = p.Phase; a.mu.Unlock() })
+	result, runErr := a.config.Provider.Run(a.ctx, before, func(p measurement.Progress) {
+		if err := a.advanceTestProgress(p.Phase); err != nil {
+			lifecycleMu.Lock()
+			lifecycleErr = errors.Join(lifecycleErr, err)
+			lifecycleMu.Unlock()
+		}
+	})
+	lifecycleMu.Lock()
+	runErr = errors.Join(runErr, lifecycleErr)
+	lifecycleMu.Unlock()
 	after, _ := a.inspector.Snapshot()
 	result.NetworkAfter = after
 	score := confidence.Calculate(confidence.Input{Complete: result.Status == measurement.StatusComplete, Cancelled: result.Status == measurement.StatusCancelled, ImpossibleValue: result.DownloadBPS < 0 || result.UploadBPS < 0 || result.MinRTTUS < 0, NonPublicProvider: result.Provider != measurement.ProviderMLabNDT7, InterfaceChanged: before.InterfaceID != "" && after.InterfaceID != "" && before.InterfaceID != after.InterfaceID, RouteChanged: before.RouteID != "" && after.RouteID != "" && before.RouteID != after.RouteID, Metered: before.Metered, ConnectionType: before.ConnectionType, WiFiQuality: before.WiFiQuality, VPNSuspected: before.VPNDetected, ProxySuspected: before.ProxyDetected})
@@ -453,17 +507,42 @@ func (a *App) runTest(kind scheduler.Kind, before measurement.NetworkContext) {
 	result.ConfidenceLevel = score.Level
 	result.ConfidenceReasons = score.Reasons
 	result.PublicEligible = score.PublicEligible
+	if err := a.transitionTest(measurement.TestValidate); err != nil {
+		runErr = errors.Join(runErr, err)
+	}
+	if err := a.transitionTest(measurement.TestPersist); err != nil {
+		runErr = errors.Join(runErr, err)
+	}
 	saved := true
 	if err := a.store.SaveResult(context.Background(), result); err != nil {
 		saved = false
 		runErr = errors.Join(runErr, err)
 	}
 	sharing, _ := a.store.CurrentConsent(context.Background(), "fiberpulse")
+	queued := false
 	if saved && a.config.SharingTransportEnabled && sharing.Granted && result.Provider == measurement.ProviderMLabNDT7 {
-		_ = a.store.QueueShare(context.Background(), result.ID, "measurement", sharedMeasurement(result))
+		if err := a.store.QueueShare(context.Background(), result.ID, "measurement", sharedMeasurement(result)); err != nil {
+			runErr = errors.Join(runErr, err)
+		} else {
+			queued = true
+			if err := a.transitionTest(measurement.TestShareQueued); err != nil {
+				runErr = errors.Join(runErr, err)
+			}
+		}
+	}
+	terminal := measurement.TestFailed
+	if result.Status == measurement.StatusCancelled || errors.Is(runErr, context.Canceled) {
+		terminal = measurement.TestCancelled
+	} else if saved && result.Status == measurement.StatusComplete && runErr == nil {
+		terminal = measurement.TestComplete
+	}
+	if err := a.transitionTest(terminal); err != nil {
+		runErr = errors.Join(runErr, err)
+	}
+	if err := a.transitionTest(measurement.TestIdle); err != nil {
+		runErr = errors.Join(runErr, err)
 	}
 	a.mu.Lock()
-	a.testState = "idle"
 	if runErr != nil {
 		a.lastError = runErr.Error()
 	}
@@ -474,7 +553,7 @@ func (a *App) runTest(kind scheduler.Kind, before measurement.NetworkContext) {
 	paused := a.paused
 	a.mu.Unlock()
 	_ = a.store.SetScheduler(context.Background(), "waiting", next, paused)
-	a.config.Logger.Info("measurement completed", "kind", kind, "status", result.Status, "error", runErr)
+	a.config.Logger.Info("measurement completed", "kind", kind, "status", result.Status, "share_queued", queued, "error", runErr)
 }
 
 func (a *App) healthLoop() {
@@ -522,7 +601,7 @@ func (a *App) schedulerLoop() {
 			return
 		case <-ticker.C:
 			a.mu.RLock()
-			due := !a.paused && !a.nextRun.IsZero() && !time.Now().UTC().Before(a.nextRun) && a.testState == "idle"
+			due := !a.paused && !a.nextRun.IsZero() && !time.Now().UTC().Before(a.nextRun) && a.testMachine.State == measurement.TestIdle
 			a.mu.RUnlock()
 			if due {
 				if err := a.StartTest(a.ctx, scheduler.Automatic); err != nil {

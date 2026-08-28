@@ -71,6 +71,9 @@ func (p *MLabProvider) Run(parent context.Context, network NetworkContext, progr
 	}
 	client := ndt7.NewClient(p.ClientName, p.ClientVersion)
 
+	if progress != nil {
+		progress(Progress{Phase: string(TestDownload)})
+	}
 	download, err := client.StartDownload(ctx)
 	if err != nil {
 		return finishFailure(result, "mlab.download_start", err)
@@ -82,6 +85,9 @@ func (p *MLabProvider) Run(parent context.Context, network NetworkContext, progr
 		return finishFailure(result, "mlab.download", err)
 	}
 
+	if progress != nil {
+		progress(Progress{Phase: string(TestUpload)})
+	}
 	upload, err := client.StartUpload(ctx)
 	if err != nil {
 		result.Status = StatusPartial

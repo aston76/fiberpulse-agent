@@ -33,7 +33,16 @@ type Checker struct {
 
 func (c Checker) Check(ctx context.Context) Sample {
 	s := Sample{At: time.Now().UTC(), State: "unknown", Category: "unknown"}
-	s.Network, _ = c.Inspector.Snapshot()
+	if c.Inspector == nil {
+		s.DetailCode = "network.inspector_unavailable"
+		return s
+	}
+	var err error
+	s.Network, err = c.Inspector.Snapshot()
+	if err != nil {
+		s.DetailCode = "network.snapshot_failed"
+		return s
+	}
 	if !s.Network.Online {
 		s.State = "offline"
 		s.Category = "local_interface"

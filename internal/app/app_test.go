@@ -3,8 +3,10 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,6 +86,7 @@ func TestDevelopmentMeasurementIsLocalOnlyAndKeepsAutomaticSchedule(t *testing.T
 	}
 	next := time.Now().UTC().Add(2 * time.Hour).Round(time.Second)
 	a.nextRun = next
+	a.testMachine.State = measurement.TestQuotaReserved
 	a.runTest(scheduler.Manual, measurement.NetworkContext{Online: true, ConnectionType: measurement.ConnectionEthernet})
 	results, err := a.store.ListResults(ctx, 10)
 	if err != nil {
@@ -105,6 +108,50 @@ func TestDevelopmentMeasurementIsLocalOnlyAndKeepsAutomaticSchedule(t *testing.T
 	}
 	if !a.nextRun.Equal(next) {
 		t.Fatalf("manual test moved automatic schedule from %s to %s", next, a.nextRun)
+	}
+}
+
+type invalidProgressProvider struct{ measurement.FakeProvider }
+
+func (p *invalidProgressProvider) Run(ctx context.Context, network measurement.NetworkContext, progress func(measurement.Progress)) (measurement.Result, error) {
+	result, err := p.FakeProvider.Run(ctx, network, progress)
+	progress(measurement.Progress{Phase: "invented_phase"})
+	return result, err
+}
+
+func TestMeasurementLifecycleRejectsProviderPhaseAndReturnsIdle(t *testing.T) {
+	a := newTestApp(t)
+	a.config.Provider = &invalidProgressProvider{FakeProvider: measurement.FakeProvider{Delay: time.Millisecond}}
+	ctx := context.Background()
+	if err := a.store.SetConsent(ctx, storage.Consent{Scope: "mlab", Granted: true, PolicyVersion: consentPolicyVersion}); err != nil {
+		t.Fatal(err)
+	}
+	a.lastHealth.Network = measurement.NetworkContext{Online: true, ConnectionType: measurement.ConnectionEthernet}
+	if err := a.StartTest(ctx, scheduler.Manual); err != nil {
+		t.Fatal(err)
+	}
+	a.wg.Wait()
+	if a.testMachine.State != measurement.TestIdle {
+		t.Fatalf("measurement machine remained in %s", a.testMachine.State)
+	}
+	if !strings.Contains(a.lastError, "unsupported measurement progress phase") {
+		t.Fatalf("invalid provider progress was hidden: %q", a.lastError)
+	}
+}
+
+func TestRejectedPreflightReturnsIdleWithoutConsumingQuota(t *testing.T) {
+	a := newTestApp(t)
+	a.lastHealth.Network = measurement.NetworkContext{Online: true, ConnectionType: measurement.ConnectionEthernet}
+	err := a.StartTest(context.Background(), scheduler.Manual)
+	if !errors.Is(err, measurement.ErrConsentRequired) {
+		t.Fatalf("preflight error=%v", err)
+	}
+	if a.testMachine.State != measurement.TestIdle {
+		t.Fatalf("rejected preflight left state %s", a.testMachine.State)
+	}
+	count, countErr := a.store.CountAttempts(context.Background(), time.Time{}, nil)
+	if countErr != nil || count != 0 {
+		t.Fatalf("rejected preflight consumed quota: count=%d err=%v", count, countErr)
 	}
 }
 
