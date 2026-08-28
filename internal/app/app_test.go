@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/reporting"
 	"fiberpulse.dev/agent/internal/scheduler"
+	"fiberpulse.dev/agent/internal/sharing"
 	"fiberpulse.dev/agent/internal/storage"
 )
 
@@ -290,6 +292,67 @@ func TestSharingCannotBeEnabledWithoutATransport(t *testing.T) {
 	consent, readErr := a.store.CurrentConsent(context.Background(), "fiberpulse")
 	if readErr != nil || consent.Granted {
 		t.Fatalf("consent=%+v err=%v", consent, readErr)
+	}
+}
+
+func TestGrantedSharingRestoresSuspendedWithoutTransport(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fiberpulse.db")
+	store, err := storage.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetConsent(ctx, storage.Consent{Scope: "fiberpulse", Granted: true, PolicyVersion: consentPolicyVersion}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(Config{Version: "test", DatabasePath: path, Provider: &measurement.FakeProvider{Delay: time.Millisecond}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if a.shareState.State != sharing.Suspended {
+		t.Fatalf("state=%s", a.shareState.State)
+	}
+	queued, err := a.queueMeasurementForSharing(ctx, measurement.Result{ID: "suspended", Provider: measurement.ProviderMLabNDT7})
+	if err != nil || queued {
+		t.Fatalf("suspended sharing queued=%v err=%v", queued, err)
+	}
+}
+
+func TestSharingRevocationPurgesConcurrentQueue(t *testing.T) {
+	ctx := context.Background()
+	a, err := New(Config{Version: "test", DatabasePath: filepath.Join(t.TempDir(), "fiberpulse.db"), Provider: &measurement.FakeProvider{Delay: time.Millisecond}, SharingTransportEnabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if err := a.Action(ctx, "consent", []byte(`{"scope":"fiberpulse","granted":true,"language":"en"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if a.shareState.State != sharing.Enabled {
+		t.Fatalf("state=%s", a.shareState.State)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _ = a.queueMeasurementForSharing(ctx, measurement.Result{ID: fmt.Sprintf("measurement-%d", i), Provider: measurement.ProviderMLabNDT7})
+		}(i)
+	}
+	if err := a.Action(ctx, "consent", []byte(`{"scope":"fiberpulse","granted":false,"language":"en"}`)); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	if a.shareState.State != sharing.Revoked {
+		t.Fatalf("state=%s", a.shareState.State)
+	}
+	count, err := a.store.ShareQueueCount(ctx)
+	if err != nil || count != 0 {
+		t.Fatalf("queue count=%d err=%v", count, err)
 	}
 }
 

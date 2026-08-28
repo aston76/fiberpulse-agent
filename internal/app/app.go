@@ -20,6 +20,7 @@ import (
 	"fiberpulse.dev/agent/internal/network"
 	"fiberpulse.dev/agent/internal/reporting"
 	"fiberpulse.dev/agent/internal/scheduler"
+	"fiberpulse.dev/agent/internal/sharing"
 	"fiberpulse.dev/agent/internal/storage"
 	"github.com/google/uuid"
 )
@@ -47,12 +48,14 @@ type App struct {
 	local       *localapi.Server
 	scheduler   scheduler.Scheduler
 	schedulerMu sync.Mutex
+	sharingMu   sync.Mutex
 	ctx         context.Context
 	cancel      context.CancelFunc
 	mu          sync.RWMutex
 	lifecycle   LifecycleMachine
 	testMachine measurement.TestMachine
 	schedule    scheduler.Machine
+	shareState  sharing.Machine
 	paused      bool
 	nextRun     time.Time
 	lastHealth  health.Sample
@@ -78,6 +81,7 @@ type Snapshot struct {
 	Provider          measurement.Metadata `json:"provider"`
 	MLabConsent       storage.Consent      `json:"mlab_consent"`
 	SharingConsent    storage.Consent      `json:"sharing_consent"`
+	SharingState      string               `json:"sharing_state"`
 	LastHealth        health.Sample        `json:"last_health"`
 	Measurements      []measurement.Result `json:"measurements"`
 	ShareQueueCount   int                  `json:"share_queue_count"`
@@ -110,6 +114,22 @@ func New(config Config) (*App, error) {
 	a.health = health.Checker{Inspector: inspector, DNSName: config.DNSName, ProbeURL: config.ProbeURL}
 	a.scheduler = scheduler.Scheduler{Store: store}
 	a.local = localapi.New(a)
+	sharingConsent, err := store.CurrentConsent(context.Background(), "fiberpulse")
+	if err != nil {
+		cancel()
+		_ = store.Close()
+		return nil, fmt.Errorf("restore sharing consent: %w", err)
+	}
+	switch {
+	case sharingConsent.OccurredAt.IsZero():
+		a.shareState.State = sharing.NotAsked
+	case sharingConsent.Granted && config.SharingTransportEnabled:
+		a.shareState.State = sharing.Enabled
+	case sharingConsent.Granted:
+		a.shareState.State = sharing.Suspended
+	default:
+		a.shareState.State = sharing.Revoked
+	}
 	if err := store.RecoverInterruptedReports(context.Background(), time.Now().UTC()); err != nil {
 		cancel()
 		_ = store.Close()
@@ -236,7 +256,7 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 	personalBaseline := calculateBaseline(results)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return Snapshot{Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
+	return Snapshot{Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
 }
 
 func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) error {
@@ -265,6 +285,9 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 		}
 		if body.Scope == "fiberpulse" && body.Granted && !a.config.SharingTransportEnabled {
 			return errors.New("FiberPulse sharing is unavailable in this development build")
+		}
+		if body.Scope == "fiberpulse" {
+			return a.setSharingConsent(ctx, body.Granted, body.Language)
 		}
 		if body.Scope == "mlab" {
 			a.testMu.Lock()
@@ -362,6 +385,63 @@ func (a *App) setSchedulerState(ctx context.Context, target scheduler.State, nex
 	a.schedule = machine
 	a.nextRun = next
 	a.paused = paused
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *App) setSharingConsent(ctx context.Context, granted bool, language string) error {
+	a.sharingMu.Lock()
+	defer a.sharingMu.Unlock()
+	current, err := a.store.CurrentConsent(ctx, "fiberpulse")
+	if err != nil {
+		return err
+	}
+	if !current.OccurredAt.IsZero() && current.Granted == granted {
+		return nil
+	}
+	a.mu.RLock()
+	machine := a.shareState
+	a.mu.RUnlock()
+	initialDecline := !granted && machine.State == sharing.NotAsked
+	if !initialDecline {
+		transition := sharing.Enabling
+		if !granted {
+			transition = sharing.Revoking
+		}
+		if err := machine.Transition(transition); err != nil {
+			return err
+		}
+		a.mu.Lock()
+		a.shareState = machine
+		a.mu.Unlock()
+	}
+	if err := a.store.SetConsent(ctx, storage.Consent{Scope: "fiberpulse", Granted: granted, PolicyVersion: consentPolicyVersion, Language: language, Source: "local_dashboard"}); err != nil {
+		if !initialDecline {
+			if transitionErr := machine.Transition(sharing.Error); transitionErr != nil {
+				err = errors.Join(err, transitionErr)
+			}
+		}
+		a.mu.Lock()
+		a.shareState = machine
+		a.lastError = err.Error()
+		a.mu.Unlock()
+		return err
+	}
+	if initialDecline {
+		if err := machine.Transition(sharing.Declined); err != nil {
+			return err
+		}
+	} else {
+		final := sharing.Enabled
+		if !granted {
+			final = sharing.Revoked
+		}
+		if err := machine.Transition(final); err != nil {
+			return err
+		}
+	}
+	a.mu.Lock()
+	a.shareState = machine
 	a.mu.Unlock()
 	return nil
 }
@@ -611,13 +691,13 @@ func (a *App) runTest(kind scheduler.Kind, before measurement.NetworkContext) {
 		saved = false
 		runErr = errors.Join(runErr, err)
 	}
-	sharing, _ := a.store.CurrentConsent(context.Background(), "fiberpulse")
 	queued := false
-	if saved && a.config.SharingTransportEnabled && sharing.Granted && result.Provider == measurement.ProviderMLabNDT7 {
-		if err := a.store.QueueShare(context.Background(), result.ID, "measurement", sharedMeasurement(result)); err != nil {
-			runErr = errors.Join(runErr, err)
-		} else {
-			queued = true
+	if saved {
+		var queueErr error
+		queued, queueErr = a.queueMeasurementForSharing(context.Background(), result)
+		if queueErr != nil {
+			runErr = errors.Join(runErr, queueErr)
+		} else if queued {
 			if err := a.transitionTest(measurement.TestShareQueued); err != nil {
 				runErr = errors.Join(runErr, err)
 			}
@@ -670,6 +750,31 @@ func (a *App) runTest(kind scheduler.Kind, before measurement.NetworkContext) {
 	}
 	a.mu.Unlock()
 	a.config.Logger.Info("measurement completed", "kind", kind, "status", result.Status, "share_queued", queued, "error", runErr)
+}
+
+func (a *App) queueMeasurementForSharing(ctx context.Context, result measurement.Result) (bool, error) {
+	if !a.config.SharingTransportEnabled || result.Provider != measurement.ProviderMLabNDT7 {
+		return false, nil
+	}
+	a.sharingMu.Lock()
+	defer a.sharingMu.Unlock()
+	a.mu.RLock()
+	state := a.shareState.State
+	a.mu.RUnlock()
+	if state != sharing.Enabled {
+		return false, nil
+	}
+	consent, err := a.store.CurrentConsent(ctx, "fiberpulse")
+	if err != nil {
+		return false, err
+	}
+	if !consent.Granted {
+		return false, errors.New("sharing state is enabled without consent")
+	}
+	if err := a.store.QueueShare(ctx, result.ID, "measurement", sharedMeasurement(result)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (a *App) healthLoop() {

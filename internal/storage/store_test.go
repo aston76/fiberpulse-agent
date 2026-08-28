@@ -49,6 +49,61 @@ func TestStorePersistsConsentQuotaAndMeasurement(t *testing.T) {
 	}
 }
 
+func TestSharingRevocationAtomicallyPurgesQueue(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.SetConsent(ctx, Consent{Scope: "fiberpulse", Granted: true, PolicyVersion: "privacy-v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueueShare(ctx, "event-1", "measurement", map[string]any{"value": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetConsent(ctx, Consent{Scope: "fiberpulse", Granted: false, PolicyVersion: "privacy-v1"}); err != nil {
+		t.Fatal(err)
+	}
+	count, err := s.ShareQueueCount(ctx)
+	if err != nil || count != 0 {
+		t.Fatalf("queue count=%d err=%v", count, err)
+	}
+	consent, err := s.CurrentConsent(ctx, "fiberpulse")
+	if err != nil || consent.Granted {
+		t.Fatalf("consent=%+v err=%v", consent, err)
+	}
+}
+
+func TestSharingRevocationRollsBackWhenQueuePurgeFails(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.SetConsent(ctx, Consent{Scope: "fiberpulse", Granted: true, PolicyVersion: "privacy-v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueueShare(ctx, "event-1", "measurement", map[string]any{"value": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER reject_share_delete BEFORE DELETE ON share_queue BEGIN SELECT RAISE(ABORT, 'test purge failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetConsent(ctx, Consent{Scope: "fiberpulse", Granted: false, PolicyVersion: "privacy-v1"}); err == nil {
+		t.Fatal("revocation committed despite queue purge failure")
+	}
+	consent, err := s.CurrentConsent(ctx, "fiberpulse")
+	if err != nil || !consent.Granted {
+		t.Fatalf("consent transaction did not roll back: %+v err=%v", consent, err)
+	}
+	count, err := s.ShareQueueCount(ctx)
+	if err != nil || count != 1 {
+		t.Fatalf("queue transaction did not roll back: count=%d err=%v", count, err)
+	}
+}
+
 func TestStorePersistsIncidentLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))

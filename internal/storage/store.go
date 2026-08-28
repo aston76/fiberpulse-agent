@@ -224,12 +224,22 @@ func (s *Store) SetConsent(ctx context.Context, c Consent) error {
 	if c.Source == "" {
 		c.Source = "local_dashboard"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO consent_events(id,scope,granted,policy_version,language,source,occurred_at) VALUES(?,?,?,?,?,?,?)`,
-		uuid.NewString(), c.Scope, boolInt(c.Granted), c.PolicyVersion, c.Language, c.Source, formatTime(c.OccurredAt))
-	if err == nil && c.Scope == "fiberpulse" && !c.Granted {
-		_, err = s.db.ExecContext(ctx, "DELETE FROM share_queue")
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	return err
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO consent_events(id,scope,granted,policy_version,language,source,occurred_at) VALUES(?,?,?,?,?,?,?)`,
+		uuid.NewString(), c.Scope, boolInt(c.Granted), c.PolicyVersion, c.Language, c.Source, formatTime(c.OccurredAt))
+	if err != nil {
+		return err
+	}
+	if c.Scope == "fiberpulse" && !c.Granted {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM share_queue"); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) CurrentConsent(ctx context.Context, scope string) (Consent, error) {
