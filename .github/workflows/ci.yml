@@ -64,8 +64,8 @@ jobs:
         run: go test ./... && sh packaging/macos/build-app.sh
       - name: Verify universal macOS binaries
         run: |
-          lipo -verify_arch arm64 x86_64 dist/macos/FiberPulse.app/Contents/MacOS/fiberpulse
-          lipo -verify_arch arm64 x86_64 dist/macos/FiberPulse.app/Contents/MacOS/fiberpulse-updater
+          lipo dist/macos/FiberPulse.app/Contents/MacOS/fiberpulse -verify_arch arm64 x86_64
+          lipo dist/macos/FiberPulse.app/Contents/MacOS/fiberpulse-updater -verify_arch arm64 x86_64
           codesign --verify --deep --strict dist/macos/FiberPulse.app
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:

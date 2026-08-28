@@ -46,8 +46,8 @@ for goarch in arm64 amd64; do
 done
 lipo -create "$build_root/arm64/fiberpulse" "$build_root/amd64/fiberpulse" -output "$app_path/Contents/MacOS/fiberpulse"
 lipo -create "$build_root/arm64/fiberpulse-updater" "$build_root/amd64/fiberpulse-updater" -output "$app_path/Contents/MacOS/fiberpulse-updater"
-lipo -verify_arch arm64 x86_64 "$app_path/Contents/MacOS/fiberpulse"
-lipo -verify_arch arm64 x86_64 "$app_path/Contents/MacOS/fiberpulse-updater"
+lipo "$app_path/Contents/MacOS/fiberpulse" -verify_arch arm64 x86_64
+lipo "$app_path/Contents/MacOS/fiberpulse-updater" -verify_arch arm64 x86_64
 cp packaging/macos/Info.plist "$app_path/Contents/Info.plist"
 cp packaging/macos/FiberPulse.icns "$app_path/Contents/Resources/FiberPulse.icns"
 cp LICENSE "$app_path/Contents/Resources/LICENSE"
