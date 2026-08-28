@@ -3,14 +3,16 @@
 package platform
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestShutdownRequestIsIdempotentWhenAgentIsNotRunning(t *testing.T) {
-	endpoint := filepath.Join(t.TempDir(), "not-running.sock")
+	// Use the same bounded endpoint derivation as production. macOS limits Unix
+	// socket paths to roughly 104 bytes and its per-test temporary directory can
+	// already exceed that limit on GitHub-hosted runners.
+	endpoint := ShutdownPath(t.TempDir())
 	if err := RequestShutdown(endpoint); err != nil {
 		t.Fatalf("idempotent shutdown failed: %v", err)
 	}
