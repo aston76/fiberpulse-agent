@@ -1,0 +1,19 @@
+FROM golang:1.26-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+ARG VERSION=0.1.0-dev
+RUN mkdir -p /out \
+    && GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
+       go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION}" -o /out/fiberpulse.exe ./cmd/fiberpulse \
+    && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+       go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/fiberpulse-updater.exe ./cmd/fiberpulse-updater
+
+ENTRYPOINT ["/bin/sh", "-c", "cp /out/*.exe /artifacts/"]

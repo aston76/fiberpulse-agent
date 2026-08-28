@@ -1,0 +1,22 @@
+{
+  "name": "fiberpulse-local-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {"node": ">=24"},
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "dev": "vite --host 127.0.0.1",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "preact": "10.29.8",
+    "uplot": "1.6.32"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2",
+    "vite": "8.2.2"
+  }
+}

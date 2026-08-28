@@ -1,0 +1,10 @@
+.DS_Store
+bin/
+dist/
+dashboard/node_modules/
+dashboard/dist/
+*.db
+*.db-*
+coverage.out
+*.log
+packaging/windows/output/
