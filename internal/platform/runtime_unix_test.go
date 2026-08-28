@@ -3,10 +3,18 @@
 package platform
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestShutdownRequestIsIdempotentWhenAgentIsNotRunning(t *testing.T) {
+	endpoint := filepath.Join(t.TempDir(), "not-running.sock")
+	if err := RequestShutdown(endpoint); err != nil {
+		t.Fatalf("idempotent shutdown failed: %v", err)
+	}
+}
 
 func TestShutdownEndpointIsShortAndAcknowledged(t *testing.T) {
 	endpoint := ShutdownPath("/Volumes/" + strings.Repeat("deep-project-directory/", 20))

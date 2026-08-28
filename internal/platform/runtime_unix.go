@@ -89,7 +89,7 @@ func ShutdownRequests(socketPath string) (<-chan struct{}, func(), error) {
 func RequestShutdown(socketPath string) error {
 	connection, err := net.DialTimeout("unix", socketPath, time.Second)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if os.IsNotExist(err) || errors.Is(err, unix.ENOENT) {
 			return nil
 		}
 		return err
