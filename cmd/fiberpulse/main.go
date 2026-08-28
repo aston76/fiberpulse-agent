@@ -37,7 +37,7 @@ func run() error {
 	if dataDir == "" {
 		dataDir = filepath.Join(configDir, "FiberPulse")
 	}
-	shutdownPath := filepath.Join(dataDir, "shutdown.sock")
+	shutdownPath := platform.ShutdownPath(dataDir)
 	if *quitExisting {
 		return platform.RequestShutdown(shutdownPath)
 	}
@@ -76,12 +76,7 @@ func run() error {
 	} else {
 		defer stopShutdownListener()
 	}
-	stopTray, trayErr := platform.StartTray(platform.TrayActions{Open: func() { _ = platform.OpenURL(agent.BootstrapURL()) }, Test: func() { _ = agent.StartTest(context.Background(), "manual") }, Pause: func() {}, Report: func() { _ = platform.OpenURL(agent.BootstrapURL()) }, Update: func() {}, Quit: func() { _ = agent.Action(context.Background(), "quit", []byte(`{}`)) }})
-	if trayErr != nil {
-		logger.Warn("native tray unavailable", "error", trayErr)
-	} else {
-		defer stopTray()
-	}
+	actions := platform.TrayActions{Open: func() { _ = platform.OpenURL(agent.BootstrapURL()) }, Test: func() { _ = agent.StartTest(context.Background(), "manual") }, Pause: func() {}, Report: func() { _ = platform.OpenURL(agent.BootstrapURL()) }, Update: func() {}, Quit: func() { _ = agent.Action(context.Background(), "quit", []byte(`{}`)) }}
 	if err := platform.OpenURL(url); err != nil {
 		logger.Info("open the dashboard manually", "url", url, "error", err)
 	}
@@ -94,7 +89,13 @@ func run() error {
 		case <-time.After(100 * 365 * 24 * time.Hour):
 		}
 	}()
+	if trayErr := platform.RunTray(actions, agent.Done()); trayErr != nil {
+		logger.Warn("native tray unavailable", "error", trayErr)
+	}
 	agent.Wait()
+	if err := agent.Close(); err != nil {
+		return err
+	}
 	logger.Info("FiberPulse shutdown complete", "os", runtime.GOOS)
 	return nil
 }

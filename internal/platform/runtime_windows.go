@@ -47,6 +47,8 @@ const (
 
 type InstanceLock struct{ handle windows.Handle }
 
+func ShutdownPath(string) string { return "" }
+
 func AcquireSingleInstance(_ string) (*InstanceLock, error) {
 	name, _ := windows.UTF16PtrFromString(instanceMutexName)
 	h, _, err := procCreateMutex.Call(0, 0, uintptr(unsafe.Pointer(name)))
@@ -149,6 +151,16 @@ func StartTray(actions TrayActions) (func(), error) {
 			procPostMessage.Call(trayWindow, wmClose, 0, 0)
 		}
 	}, nil
+}
+
+func RunTray(actions TrayActions, done <-chan struct{}) error {
+	stop, err := StartTray(actions)
+	if err != nil {
+		return err
+	}
+	defer stop()
+	<-done
+	return nil
 }
 func trayLoop() {
 	lockOSThread()

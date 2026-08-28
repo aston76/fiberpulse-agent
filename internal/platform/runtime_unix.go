@@ -3,6 +3,8 @@
 package platform
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net"
 	"os"
@@ -14,6 +16,11 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+func ShutdownPath(dataDir string) string {
+	digest := sha256.Sum256([]byte(dataDir))
+	return filepath.Join(os.TempDir(), "fiberpulse-"+hex.EncodeToString(digest[:8])+".sock")
+}
 
 type InstanceLock struct{ file *os.File }
 
@@ -88,20 +95,15 @@ func RequestShutdown(socketPath string) error {
 		return err
 	}
 	_ = connection.Close()
-	lockPath := filepath.Join(filepath.Dir(socketPath), "agent.lock")
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+		_, err := os.Stat(socketPath)
+		if os.IsNotExist(err) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
-		err = unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			_ = unix.Flock(int(lock.Fd()), unix.LOCK_UN)
-			_ = lock.Close()
-			return nil
-		}
-		_ = lock.Close()
 		time.Sleep(100 * time.Millisecond)
 	}
 	return errors.New("running FiberPulse did not stop within 10 seconds")

@@ -120,7 +120,8 @@ func (a *App) Start() (string, error) {
 	return a.local.BootstrapURL(), nil
 }
 
-func (a *App) Wait() { <-a.ctx.Done() }
+func (a *App) Wait()                 { <-a.ctx.Done() }
+func (a *App) Done() <-chan struct{} { return a.ctx.Done() }
 
 func (a *App) Close() error {
 	a.closeOnce.Do(func() {
