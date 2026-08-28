@@ -12,14 +12,16 @@ import (
 )
 
 type Sample struct {
-	At         time.Time                  `json:"at"`
-	Network    measurement.NetworkContext `json:"network"`
-	DNSOK      bool                       `json:"dns_ok"`
-	ProbeOK    bool                       `json:"probe_ok"`
-	ProbeRTTUS int64                      `json:"probe_rtt_us"`
-	State      string                     `json:"state"`
-	Category   string                     `json:"category"`
-	DetailCode string                     `json:"detail_code,omitempty"`
+	At              time.Time                  `json:"at"`
+	Network         measurement.NetworkContext `json:"network"`
+	DNSConfigured   bool                       `json:"dns_configured"`
+	DNSOK           bool                       `json:"dns_ok"`
+	ProbeConfigured bool                       `json:"probe_configured"`
+	ProbeOK         bool                       `json:"probe_ok"`
+	ProbeRTTUS      int64                      `json:"probe_rtt_us"`
+	State           string                     `json:"state"`
+	Category        string                     `json:"category"`
+	DetailCode      string                     `json:"detail_code,omitempty"`
 }
 
 type Checker struct {
@@ -37,8 +39,9 @@ func (c Checker) Check(ctx context.Context) Sample {
 		s.Category = "local_interface"
 		return s
 	}
-	s.State = "internet_usable"
+	s.State = "local_only"
 	if c.DNSName != "" {
+		s.DNSConfigured = true
 		dnsCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 		_, err := net.DefaultResolver.LookupHost(dnsCtx, c.DNSName)
@@ -48,10 +51,9 @@ func (c Checker) Check(ctx context.Context) Sample {
 			s.Category = "dns"
 			s.DetailCode = "dns.lookup_failed"
 		}
-	} else {
-		s.DNSOK = true
 	}
 	if c.ProbeURL != "" {
+		s.ProbeConfigured = true
 		if parsed, err := url.Parse(c.ProbeURL); err != nil || parsed.Scheme != "https" {
 			s.State = "internet_degraded"
 			s.Category = "internet_reachability"
@@ -78,8 +80,11 @@ func (c Checker) Check(ctx context.Context) Sample {
 			s.Category = "internet_reachability"
 			s.DetailCode = "probe.failed"
 		}
-	} else {
-		s.ProbeOK = true
+	}
+	if (!s.DNSConfigured || s.DNSOK) && (!s.ProbeConfigured || s.ProbeOK) && (s.DNSConfigured || s.ProbeConfigured) {
+		s.State = "internet_usable"
+		s.Category = "unknown"
+		s.DetailCode = ""
 	}
 	return s
 }

@@ -25,3 +25,13 @@ func TestIncompleteAlwaysBlocks(t *testing.T) {
 		t.Fatal("incomplete result became public eligible")
 	}
 }
+
+func TestDevelopmentProviderNeverBecomesPublicEligible(t *testing.T) {
+	r := Calculate(Input{Complete: true, ConnectionType: measurement.ConnectionEthernet, NonPublicProvider: true})
+	if r.Score != 100 || r.PublicEligible {
+		t.Fatalf("unexpected result: %+v", r)
+	}
+	if len(r.Reasons) != 1 || r.Reasons[0] != "provider.not_public" {
+		t.Fatalf("missing provider gate reason: %+v", r.Reasons)
+	}
+}

@@ -15,7 +15,7 @@ type FakeProvider struct {
 func (p *FakeProvider) Capabilities() []string { return []string{"download", "upload", "min_rtt"} }
 
 func (p *FakeProvider) Metadata() Metadata {
-	return Metadata{Name: "development_fake", ProtocolVersion: "fake-v1", ClientVersion: "dev", Enabled: true}
+	return Metadata{Name: ProviderDevelopmentFake, ProtocolVersion: "fake-v1", ClientVersion: "dev", Enabled: true}
 }
 
 func (p *FakeProvider) Preflight(_ context.Context, network NetworkContext, consent bool) (PreflightResult, error) {
@@ -40,7 +40,7 @@ func (p *FakeProvider) Run(ctx context.Context, network NetworkContext, progress
 	started := now().UTC()
 	select {
 	case <-ctx.Done():
-		return Result{ID: uuid.NewString(), Provider: "development_fake", StartedAt: started, CompletedAt: now().UTC(), Status: StatusCancelled}, ctx.Err()
+		return Result{ID: uuid.NewString(), Provider: ProviderDevelopmentFake, StartedAt: started, CompletedAt: now().UTC(), Status: StatusCancelled}, ctx.Err()
 	case <-time.After(delay):
 	}
 	if progress != nil {
@@ -48,7 +48,7 @@ func (p *FakeProvider) Run(ctx context.Context, network NetworkContext, progress
 		progress(Progress{Phase: "upload", Bytes: 25_000_000, ElapsedUS: 10_000_000, EstimatedBPS: 20_000_000})
 	}
 	return Result{
-		ID: uuid.NewString(), Provider: "development_fake", ProtocolVersion: "fake-v1", ClientVersion: "dev",
+		ID: uuid.NewString(), Provider: ProviderDevelopmentFake, ProtocolVersion: "fake-v1", ClientVersion: "dev",
 		SchemaVersion: SchemaVersion, MethodologyVersion: MethodologyVersion, ConfidenceVersion: ConfidenceVersion,
 		StartedAt: started, CompletedAt: now().UTC(), ServerFQDN: "fake.invalid",
 		DownloadBPS: 100_000_000, UploadBPS: 20_000_000, MinRTTUS: 12_000,

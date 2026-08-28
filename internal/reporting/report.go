@@ -98,7 +98,7 @@ func PDF(results []measurement.Result, periodStart, periodEnd time.Time) ([]byte
 		}
 	}
 	var out bytes.Buffer
-	if err := pdf.Write(&out); err != nil {
+	if _, err := pdf.WriteTo(&out); err != nil {
 		return nil, err
 	}
 	return out.Bytes(), nil

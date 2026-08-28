@@ -24,12 +24,13 @@ import (
 const consentPolicyVersion = "privacy-v1"
 
 type Config struct {
-	Version      string
-	DatabasePath string
-	Provider     measurement.Provider
-	ProbeURL     string
-	DNSName      string
-	Logger       *slog.Logger
+	Version                 string
+	DatabasePath            string
+	Provider                measurement.Provider
+	ProbeURL                string
+	DNSName                 string
+	SharingTransportEnabled bool
+	Logger                  *slog.Logger
 }
 
 type App struct {
@@ -67,6 +68,7 @@ type Snapshot struct {
 	LastHealth        health.Sample        `json:"last_health"`
 	Measurements      []measurement.Result `json:"measurements"`
 	ShareQueueCount   int                  `json:"share_queue_count"`
+	SharingAvailable  bool                 `json:"sharing_available"`
 	LastError         string               `json:"last_error,omitempty"`
 }
 
@@ -92,22 +94,23 @@ func New(config Config) (*App, error) {
 
 func (a *App) Start() (string, error) {
 	mlab, _ := a.store.CurrentConsent(a.ctx, "mlab")
-	state, next, paused, err := a.store.Scheduler(a.ctx)
+	_, next, paused, err := a.store.Scheduler(a.ctx)
 	if err != nil {
 		return "", err
 	}
 	if next.IsZero() || next.Before(time.Now().UTC()) {
 		next = time.Now().UTC().Add(scheduler.RecoveryDelay(randomUnit()))
-		state = "recovered"
-		_ = a.store.SetScheduler(a.ctx, state, next, paused)
+		_ = a.store.SetScheduler(a.ctx, "recovered", next, paused)
 	}
 	a.mu.Lock()
 	a.paused = paused
 	a.nextRun = next
-	if mlab.Granted {
-		a.state = "monitoring"
-	} else {
+	if !mlab.Granted {
 		a.state = "consent_required"
+	} else if paused {
+		a.state = "paused"
+	} else {
+		a.state = "monitoring"
 	}
 	a.mu.Unlock()
 	if err := a.local.Start(); err != nil {
@@ -182,7 +185,7 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 	queue, _ := a.store.ShareQueueCount(ctx)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return Snapshot{Version: a.config.Version, State: a.state, TestState: a.testState, Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, LastError: a.lastError}, nil
+	return Snapshot{Version: a.config.Version, State: a.state, TestState: a.testState, Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, LastError: a.lastError}, nil
 }
 
 func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) error {
@@ -206,15 +209,20 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 		if err := json.Unmarshal(raw, &body); err != nil {
 			return err
 		}
+		if body.Scope == "fiberpulse" && body.Granted && !a.config.SharingTransportEnabled {
+			return errors.New("FiberPulse sharing is unavailable in this development build")
+		}
 		if err := a.store.SetConsent(ctx, storage.Consent{Scope: body.Scope, Granted: body.Granted, PolicyVersion: consentPolicyVersion, Language: body.Language, Source: "local_dashboard"}); err != nil {
 			return err
 		}
 		a.mu.Lock()
 		if body.Scope == "mlab" {
-			if body.Granted {
-				a.state = "monitoring"
-			} else {
+			if !body.Granted {
 				a.state = "consent_required"
+			} else if a.paused {
+				a.state = "paused"
+			} else {
+				a.state = "monitoring"
 			}
 		}
 		a.mu.Unlock()
@@ -233,12 +241,18 @@ func (a *App) SetPaused(ctx context.Context, paused bool) error {
 	a.mu.RLock()
 	next := a.nextRun
 	a.mu.RUnlock()
+	consent, err := a.store.CurrentConsent(ctx, "mlab")
+	if err != nil {
+		return err
+	}
 	if err := a.store.SetScheduler(ctx, "waiting", next, paused); err != nil {
 		return err
 	}
 	a.mu.Lock()
 	a.paused = paused
-	if paused {
+	if !consent.Granted {
+		a.state = "consent_required"
+	} else if paused {
 		a.state = "paused"
 	} else {
 		a.state = "monitoring"
@@ -318,16 +332,18 @@ func (a *App) runTest(kind scheduler.Kind, before measurement.NetworkContext) {
 	result, runErr := a.config.Provider.Run(a.ctx, before, func(p measurement.Progress) { a.mu.Lock(); a.testState = p.Phase; a.mu.Unlock() })
 	after, _ := a.inspector.Snapshot()
 	result.NetworkAfter = after
-	score := confidence.Calculate(confidence.Input{Complete: result.Status == measurement.StatusComplete, Cancelled: result.Status == measurement.StatusCancelled, ImpossibleValue: result.DownloadBPS < 0 || result.UploadBPS < 0 || result.MinRTTUS < 0, InterfaceChanged: before.InterfaceID != "" && after.InterfaceID != "" && before.InterfaceID != after.InterfaceID, RouteChanged: before.RouteID != "" && after.RouteID != "" && before.RouteID != after.RouteID, Metered: before.Metered, ConnectionType: before.ConnectionType, WiFiQuality: before.WiFiQuality, VPNSuspected: before.VPNDetected, ProxySuspected: before.ProxyDetected})
+	score := confidence.Calculate(confidence.Input{Complete: result.Status == measurement.StatusComplete, Cancelled: result.Status == measurement.StatusCancelled, ImpossibleValue: result.DownloadBPS < 0 || result.UploadBPS < 0 || result.MinRTTUS < 0, NonPublicProvider: result.Provider != measurement.ProviderMLabNDT7, InterfaceChanged: before.InterfaceID != "" && after.InterfaceID != "" && before.InterfaceID != after.InterfaceID, RouteChanged: before.RouteID != "" && after.RouteID != "" && before.RouteID != after.RouteID, Metered: before.Metered, ConnectionType: before.ConnectionType, WiFiQuality: before.WiFiQuality, VPNSuspected: before.VPNDetected, ProxySuspected: before.ProxyDetected})
 	result.ConfidenceScore = score.Score
 	result.ConfidenceLevel = score.Level
 	result.ConfidenceReasons = score.Reasons
 	result.PublicEligible = score.PublicEligible
+	saved := true
 	if err := a.store.SaveResult(context.Background(), result); err != nil {
+		saved = false
 		runErr = errors.Join(runErr, err)
 	}
 	sharing, _ := a.store.CurrentConsent(context.Background(), "fiberpulse")
-	if sharing.Granted {
+	if saved && a.config.SharingTransportEnabled && sharing.Granted && result.Provider == measurement.ProviderMLabNDT7 {
 		_ = a.store.QueueShare(context.Background(), result.ID, "measurement", sharedMeasurement(result))
 	}
 	a.mu.Lock()
@@ -335,7 +351,9 @@ func (a *App) runTest(kind scheduler.Kind, before measurement.NetworkContext) {
 	if runErr != nil {
 		a.lastError = runErr.Error()
 	}
-	a.nextRun = time.Now().UTC().Add(scheduler.NextInterval(2, randomUnit()))
+	if kind == scheduler.Automatic {
+		a.nextRun = time.Now().UTC().Add(scheduler.NextInterval(2, randomUnit()))
+	}
 	next := a.nextRun
 	paused := a.paused
 	a.mu.Unlock()

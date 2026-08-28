@@ -147,3 +147,29 @@ func TestStaticSecurityHeaders(t *testing.T) {
 		t.Fatal("missing nosniff")
 	}
 }
+
+func TestUnauthenticatedBrowserGetsRecoveryInstructions(t *testing.T) {
+	server := New(&testController{})
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close(context.Background())
+	response, err := http.Get(server.BaseURL() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized || !strings.Contains(string(body), "menu-bar or system-tray icon") {
+		t.Fatalf("status=%d body=%q", response.StatusCode, body)
+	}
+	response, err = http.Get(server.BaseURL() + "/api/v1/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized || !strings.Contains(string(body), "authentication.required") {
+		t.Fatalf("API status=%d body=%q", response.StatusCode, body)
+	}
+}

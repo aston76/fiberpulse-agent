@@ -29,6 +29,10 @@ jobs:
         run: diff -r dashboard/dist internal/localapi/web
       - name: Test Go core
         run: go test -race ./... && go vet ./...
+      - name: Static and vulnerability checks
+        run: |
+          go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
   windows-x64:
     runs-on: ubuntu-latest

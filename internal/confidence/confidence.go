@@ -3,20 +3,21 @@ package confidence
 import "fiberpulse.dev/agent/internal/measurement"
 
 type Input struct {
-	Complete         bool
-	Cancelled        bool
-	ImpossibleValue  bool
-	InterfaceChanged bool
-	RouteChanged     bool
-	Metered          bool
-	ConnectionType   measurement.ConnectionType
-	WiFiQuality      int
-	PHYBelowPlan     bool
-	CompetingTraffic bool
-	ResourcePressure bool
-	VPNSuspected     bool
-	ProxySuspected   bool
-	ASNMismatch      bool
+	Complete          bool
+	Cancelled         bool
+	ImpossibleValue   bool
+	NonPublicProvider bool
+	InterfaceChanged  bool
+	RouteChanged      bool
+	Metered           bool
+	ConnectionType    measurement.ConnectionType
+	WiFiQuality       int
+	PHYBelowPlan      bool
+	CompetingTraffic  bool
+	ResourcePressure  bool
+	VPNSuspected      bool
+	ProxySuspected    bool
+	ASNMismatch       bool
 }
 
 type Result struct {
@@ -43,6 +44,9 @@ func Calculate(in Input) Result {
 	}
 	if in.ImpossibleValue {
 		deduct("result.impossible_value", 30, true)
+	}
+	if in.NonPublicProvider {
+		deduct("provider.not_public", 0, true)
 	}
 	if in.InterfaceChanged {
 		deduct("network.interface_changed", 20, true)

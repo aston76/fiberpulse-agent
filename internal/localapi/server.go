@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -96,7 +97,15 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("fp_session")
 		if err != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(s.session)) != 1 {
-			http.Error(w, "authentication required", http.StatusUnauthorized)
+			if !strings.HasPrefix(r.URL.Path, "/api/") && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusUnauthorized)
+				if r.Method == http.MethodGet {
+					_, _ = io.WriteString(w, "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>FiberPulse authorization required</title><main><h1>FiberPulse authorization required</h1><p>Open FiberPulse from its menu-bar or system-tray icon to create a fresh private dashboard session.</p><p>This page cannot authorize itself and no data has been exposed.</p></main></html>")
+				}
+				return
+			}
+			writeError(w, http.StatusUnauthorized, "authentication.required")
 			return
 		}
 		next(w, r)

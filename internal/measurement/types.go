@@ -7,10 +7,11 @@ import (
 )
 
 const (
-	ProviderMLabNDT7   = "mlab_ndt7"
-	SchemaVersion      = "measurement-v1"
-	MethodologyVersion = "methodology-v1"
-	ConfidenceVersion  = "confidence-v1"
+	ProviderMLabNDT7        = "mlab_ndt7"
+	ProviderDevelopmentFake = "development_fake"
+	SchemaVersion           = "measurement-v1"
+	MethodologyVersion      = "methodology-v1"
+	ConfidenceVersion       = "confidence-v1"
 )
 
 var (
