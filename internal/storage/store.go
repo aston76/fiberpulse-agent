@@ -17,6 +17,7 @@ import (
 	"fiberpulse.dev/agent/internal/health"
 	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/measurement"
+	"fiberpulse.dev/agent/internal/reporting"
 	"fiberpulse.dev/agent/internal/scheduler"
 	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
@@ -145,7 +146,7 @@ func (s *Store) SaveResult(ctx context.Context, r measurement.Result) error {
 }
 
 func (s *Store) ListResults(ctx context.Context, limit int) ([]measurement.Result, error) {
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 || limit > 10000 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id,provider,protocol_version,client_version,schema_version,
@@ -309,6 +310,76 @@ func (s *Store) ShareQueueCount(ctx context.Context) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM share_queue").Scan(&count)
 	return count, err
+}
+
+func (s *Store) SaveReport(ctx context.Context, report reporting.Record) error {
+	if report.ID == "" || (report.Format != "pdf" && report.Format != "csv") || !reporting.ValidState(report.State) {
+		return errors.New("invalid report record")
+	}
+	if report.PeriodStart.IsZero() || report.PeriodEnd.IsZero() || report.PeriodEnd.Before(report.PeriodStart) || report.CreatedAt.IsZero() {
+		return errors.New("invalid report time range")
+	}
+	if report.UpdatedAt.IsZero() {
+		report.UpdatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO report_exports(
+		id,format,state,period_start,period_end,byte_count,error_code,created_at,updated_at
+	) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+		state=excluded.state,byte_count=excluded.byte_count,error_code=excluded.error_code,updated_at=excluded.updated_at`,
+		report.ID, report.Format, string(report.State), formatTime(report.PeriodStart), formatTime(report.PeriodEnd),
+		report.ByteCount, report.ErrorCode, formatTime(report.CreatedAt), formatTime(report.UpdatedAt))
+	return err
+}
+
+func (s *Store) GetReport(ctx context.Context, id string) (reporting.Record, error) {
+	var report reporting.Record
+	var state, periodStart, periodEnd, created, updated string
+	err := s.db.QueryRowContext(ctx, `SELECT id,format,state,period_start,period_end,byte_count,error_code,created_at,updated_at
+		FROM report_exports WHERE id=?`, id).Scan(&report.ID, &report.Format, &state, &periodStart, &periodEnd,
+		&report.ByteCount, &report.ErrorCode, &created, &updated)
+	if err != nil {
+		return reporting.Record{}, err
+	}
+	report.State = reporting.State(state)
+	report.PeriodStart, _ = time.Parse(time.RFC3339Nano, periodStart)
+	report.PeriodEnd, _ = time.Parse(time.RFC3339Nano, periodEnd)
+	report.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	report.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return report, nil
+}
+
+func (s *Store) ListReports(ctx context.Context, limit int) ([]reporting.Record, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,format,state,period_start,period_end,byte_count,error_code,created_at,updated_at
+		FROM report_exports ORDER BY created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]reporting.Record, 0)
+	for rows.Next() {
+		var report reporting.Record
+		var state, periodStart, periodEnd, created, updated string
+		if err := rows.Scan(&report.ID, &report.Format, &state, &periodStart, &periodEnd, &report.ByteCount,
+			&report.ErrorCode, &created, &updated); err != nil {
+			return nil, err
+		}
+		report.State = reporting.State(state)
+		report.PeriodStart, _ = time.Parse(time.RFC3339Nano, periodStart)
+		report.PeriodEnd, _ = time.Parse(time.RFC3339Nano, periodEnd)
+		report.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		report.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		result = append(result, report)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) RecoverInterruptedReports(ctx context.Context, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE report_exports SET state='failed',error_code='generation.interrupted',updated_at=?
+		WHERE state IN ('drafting','exporting')`, formatTime(now))
+	return err
 }
 
 type incidentExecutor interface {

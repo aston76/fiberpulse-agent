@@ -169,8 +169,12 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.validOrigin(r) || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CSRF-Token")), []byte(s.csrf)) != 1 {
+		writeError(w, http.StatusForbidden, "csrf.invalid")
 		return
 	}
 	format := strings.TrimPrefix(r.URL.Path, "/api/v1/export/")

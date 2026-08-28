@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"fiberpulse.dev/agent/internal/health"
 	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/measurement"
+	"fiberpulse.dev/agent/internal/reporting"
 	"fiberpulse.dev/agent/internal/scheduler"
 	"fiberpulse.dev/agent/internal/storage"
 )
@@ -202,5 +204,67 @@ func TestSnapshotIncludesPersonalBaseline(t *testing.T) {
 	snapshot := raw.(Snapshot)
 	if snapshot.Baseline.Maturity != "provisional" || snapshot.Baseline.Count != 10 || snapshot.Baseline.Days != 3 || snapshot.Baseline.DownloadMAD == 0 {
 		t.Fatalf("unexpected baseline: %+v", snapshot.Baseline)
+	}
+}
+
+func TestReportExportLifecycleAndDeletion(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 28, 1, 0, 0, 0, time.UTC)
+	result := measurement.Result{
+		ID: "report-measurement", Provider: measurement.ProviderDevelopmentFake, ProtocolVersion: "fake-v1", ClientVersion: "test",
+		SchemaVersion: measurement.SchemaVersion, MethodologyVersion: measurement.MethodologyVersion, ConfidenceVersion: measurement.ConfidenceVersion,
+		StartedAt: now, CompletedAt: now.Add(time.Second), DownloadBPS: 100_000_000, UploadBPS: 20_000_000,
+		MinRTTUS: 10_000, Status: measurement.StatusComplete, ConfidenceLevel: "high", ConfidenceScore: 90,
+	}
+	if err := a.store.SaveResult(ctx, result); err != nil {
+		t.Fatal(err)
+	}
+	for _, format := range []string{"csv", "pdf"} {
+		body, contentType, err := a.Export(ctx, format)
+		if err != nil {
+			t.Fatalf("export %s: %v", format, err)
+		}
+		if len(body) == 0 || contentType == "" {
+			t.Fatalf("empty %s export", format)
+		}
+		if format == "pdf" && !bytes.HasPrefix(body, []byte("%PDF")) {
+			t.Fatal("PDF export has no PDF signature")
+		}
+	}
+	reports, err := a.store.ListReports(ctx, 10)
+	if err != nil || len(reports) != 2 {
+		t.Fatalf("reports=%+v err=%v", reports, err)
+	}
+	for _, report := range reports {
+		if report.State != reporting.Exported || report.ByteCount == 0 || report.ErrorCode != "" {
+			t.Fatalf("invalid exported report: %+v", report)
+		}
+	}
+	raw, err := a.Snapshot(ctx)
+	if err != nil || len(raw.(Snapshot).Reports) != 2 {
+		t.Fatalf("report history missing from snapshot: %+v err=%v", raw, err)
+	}
+	id := reports[0].ID
+	if err := a.Action(ctx, "report-delete", []byte(`{"id":"`+id+`"}`)); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := a.store.GetReport(ctx, id)
+	if err != nil || deleted.State != reporting.Deleted {
+		t.Fatalf("deleted report=%+v err=%v", deleted, err)
+	}
+	if err := a.Action(ctx, "report-delete", []byte(`{"id":"`+id+`"}`)); err == nil {
+		t.Fatal("deleted report was deleted twice")
+	}
+}
+
+func TestEmptyReportFailsVisibly(t *testing.T) {
+	a := newTestApp(t)
+	if _, _, err := a.Export(context.Background(), "pdf"); err == nil {
+		t.Fatal("empty report unexpectedly succeeded")
+	}
+	reports, err := a.store.ListReports(context.Background(), 10)
+	if err != nil || len(reports) != 1 || reports[0].State != reporting.Failed || reports[0].ErrorCode != "report.no_measurements" {
+		t.Fatalf("failed report=%+v err=%v", reports, err)
 	}
 }

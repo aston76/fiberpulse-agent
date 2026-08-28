@@ -8,6 +8,7 @@ import (
 
 	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/measurement"
+	"fiberpulse.dev/agent/internal/reporting"
 	"fiberpulse.dev/agent/internal/scheduler"
 )
 
@@ -109,6 +110,42 @@ func TestPersistIncidentRuntimeIsAtomic(t *testing.T) {
 	found, err := s.GetSetting(ctx, "incident_runtime_test", &runtime)
 	if err != nil || !found || runtime["state"] != "suspected" || runtime["bad_count"] != float64(2) {
 		t.Fatalf("runtime transaction did not roll back: found=%v runtime=%+v err=%v", found, runtime, err)
+	}
+}
+
+func TestStorePersistsAndRecoversReportLifecycle(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Date(2026, 8, 28, 1, 0, 0, 0, time.UTC)
+	report := reporting.Record{ID: "report-1", Format: "pdf", State: reporting.Drafting, PeriodStart: now.AddDate(-1, -1, 0), PeriodEnd: now, CreatedAt: now, UpdatedAt: now}
+	if err := s.SaveReport(ctx, report); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecoverInterruptedReports(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := s.GetReport(ctx, report.ID)
+	if err != nil || recovered.State != reporting.Failed || recovered.ErrorCode != "generation.interrupted" {
+		t.Fatalf("recovered report=%+v err=%v", recovered, err)
+	}
+	reports, err := s.ListReports(ctx, 10)
+	if err != nil || len(reports) != 1 || reports[0].ID != report.ID {
+		t.Fatalf("reports=%+v err=%v", reports, err)
+	}
+}
+
+func TestStoreRejectsInvalidReport(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.SaveReport(context.Background(), reporting.Record{ID: "bad", Format: "html", State: reporting.Exported}); err == nil {
+		t.Fatal("invalid report was persisted")
 	}
 }
 

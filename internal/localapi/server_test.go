@@ -94,8 +94,10 @@ func TestBootstrapSessionHostAndCSRF(t *testing.T) {
 	}
 	response.Body.Close()
 	exportURL := server.BaseURL() + "/api/v1/export/csv"
-	request, _ = http.NewRequest(http.MethodGet, exportURL, nil)
+	request, _ = http.NewRequest(http.MethodPost, exportURL, nil)
 	request.AddCookie(cookies[0])
+	request.Header.Set("Origin", server.BaseURL())
+	request.Header.Set("X-CSRF-Token", envelope.CSRF)
 	response, err = client.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -108,6 +110,26 @@ func TestBootstrapSessionHostAndCSRF(t *testing.T) {
 	if disposition := response.Header.Get("Content-Disposition"); disposition != "attachment; filename=fiberpulse-report.csv" {
 		t.Fatalf("unexpected content disposition %q", disposition)
 	}
+	request, _ = http.NewRequest(http.MethodGet, exportURL, nil)
+	request.AddCookie(cookies[0])
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("mutating GET export status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	request, _ = http.NewRequest(http.MethodPost, exportURL, nil)
+	request.AddCookie(cookies[0])
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("export without CSRF status=%d", response.StatusCode)
+	}
+	response.Body.Close()
 	faviconURL := server.BaseURL() + "/assets/fiberpulse-mark.png"
 	request, _ = http.NewRequest(http.MethodGet, faviconURL, nil)
 	request.AddCookie(cookies[0])

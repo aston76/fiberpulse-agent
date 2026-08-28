@@ -78,6 +78,7 @@ type Snapshot struct {
 	SharingAvailable  bool                 `json:"sharing_available"`
 	Baseline          baseline.Result      `json:"baseline"`
 	Incidents         []incidents.Record   `json:"incidents"`
+	Reports           []reporting.Record   `json:"reports"`
 	LastError         string               `json:"last_error,omitempty"`
 }
 
@@ -103,6 +104,11 @@ func New(config Config) (*App, error) {
 	a.health = health.Checker{Inspector: inspector, DNSName: config.DNSName, ProbeURL: config.ProbeURL}
 	a.scheduler = scheduler.Scheduler{Store: store}
 	a.local = localapi.New(a)
+	if err := store.RecoverInterruptedReports(context.Background(), time.Now().UTC()); err != nil {
+		cancel()
+		_ = store.Close()
+		return nil, fmt.Errorf("recover interrupted reports: %w", err)
+	}
 	if err := a.restoreIncidentRuntime(context.Background()); err != nil {
 		cancel()
 		_ = store.Close()
@@ -206,10 +212,14 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	recentReports, err := a.store.ListReports(ctx, 100)
+	if err != nil {
+		return nil, err
+	}
 	personalBaseline := calculateBaseline(results)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return Snapshot{Version: a.config.Version, State: a.state, TestState: a.testState, Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, LastError: a.lastError}, nil
+	return Snapshot{Version: a.config.Version, State: a.state, TestState: a.testState, Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
 }
 
 func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) error {
@@ -262,6 +272,14 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 			return err
 		}
 		return a.dismissIncident(ctx, body.ID)
+	case "report-delete":
+		var body struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return err
+		}
+		return a.deleteReport(ctx, body.ID)
 	default:
 		return fmt.Errorf("unknown action %q", name)
 	}
@@ -303,22 +321,88 @@ func (a *App) TogglePause(ctx context.Context) error {
 }
 
 func (a *App) Export(ctx context.Context, format string) ([]byte, string, error) {
-	results, err := a.store.ListResults(ctx, 1000)
-	if err != nil {
-		return nil, "", err
-	}
-	end := time.Now().UTC()
-	start := end.AddDate(-1, -1, 0)
-	switch format {
-	case "csv":
-		body, err := reporting.CSV(results)
-		return body, "text/csv; charset=utf-8", err
-	case "pdf":
-		body, err := reporting.PDF(results, start, end)
-		return body, "application/pdf", err
-	default:
+	if format != "csv" && format != "pdf" {
 		return nil, "", errors.New("unsupported export format")
 	}
+	now := time.Now().UTC()
+	report := reporting.Record{
+		ID: uuid.NewString(), Format: format, State: reporting.Drafting,
+		PeriodStart: now.AddDate(-1, -1, 0), PeriodEnd: now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := a.store.SaveReport(ctx, report); err != nil {
+		return nil, "", err
+	}
+	failFrom := func(from reporting.State, code string, cause error) ([]byte, string, error) {
+		machine := reporting.Machine{State: from}
+		if transitionErr := machine.Transition(reporting.Failed); transitionErr == nil {
+			report.State = machine.State
+			report.ErrorCode = code
+			report.UpdatedAt = time.Now().UTC()
+			if saveErr := a.store.SaveReport(context.Background(), report); saveErr != nil {
+				cause = errors.Join(cause, saveErr)
+			}
+		}
+		return nil, "", cause
+	}
+	results, err := a.store.ListResults(ctx, 10000)
+	if err != nil {
+		return failFrom(reporting.Drafting, "measurements.read_failed", err)
+	}
+	if len(results) == 0 {
+		return failFrom(reporting.Drafting, "report.no_measurements", errors.New("no measurements are available for this report"))
+	}
+	var body []byte
+	var contentType string
+	switch format {
+	case "csv":
+		body, err = reporting.CSV(results)
+		contentType = "text/csv; charset=utf-8"
+	case "pdf":
+		body, err = reporting.PDF(results, report.PeriodStart, report.PeriodEnd)
+		contentType = "application/pdf"
+	}
+	if err != nil {
+		return failFrom(reporting.Drafting, "report.generation_failed", err)
+	}
+	machine := reporting.Machine{State: report.State}
+	if err := machine.Transition(reporting.Ready); err != nil {
+		return failFrom(reporting.Drafting, "report.transition_failed", err)
+	}
+	if err := machine.Transition(reporting.Exporting); err != nil {
+		return failFrom(reporting.Drafting, "report.transition_failed", err)
+	}
+	report.State = machine.State
+	report.UpdatedAt = time.Now().UTC()
+	if err := a.store.SaveReport(ctx, report); err != nil {
+		return failFrom(reporting.Drafting, "report.persistence_failed", err)
+	}
+	if err := machine.Transition(reporting.Exported); err != nil {
+		return failFrom(reporting.Exporting, "report.transition_failed", err)
+	}
+	report.State = machine.State
+	report.ByteCount = int64(len(body))
+	report.UpdatedAt = time.Now().UTC()
+	if err := a.store.SaveReport(ctx, report); err != nil {
+		return failFrom(reporting.Exporting, "report.persistence_failed", err)
+	}
+	return body, contentType, nil
+}
+
+func (a *App) deleteReport(ctx context.Context, id string) error {
+	if id == "" {
+		return errors.New("report id is required")
+	}
+	report, err := a.store.GetReport(ctx, id)
+	if err != nil {
+		return err
+	}
+	machine := reporting.Machine{State: report.State}
+	if err := machine.Transition(reporting.Deleted); err != nil {
+		return err
+	}
+	report.State = machine.State
+	report.UpdatedAt = time.Now().UTC()
+	return a.store.SaveReport(ctx, report)
 }
 
 func (a *App) StartTest(ctx context.Context, kind scheduler.Kind) error {

@@ -176,6 +176,13 @@ a { color: #3aa6ff; }
 .incident-row strong { text-transform: capitalize; overflow-wrap: anywhere; }
 .incident-row small { grid-column: 1 / -1; color: var(--muted); line-height: 1.45; }
 .incident-row .button { flex: 0 0 auto; }
+.report-history { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
+.report-history h3 { margin: 4px 0 0; font-size: 1rem; }
+.report-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.report-list li { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: #071426; }
+.report-list li > div { display: grid; gap: 4px; min-width: 0; }
+.report-list strong { font-size: .76rem; text-transform: capitalize; overflow-wrap: anywhere; }
+.report-list small { color: var(--muted); overflow-wrap: anywhere; }
 
 .consents { margin: 58px 0 16px; }
 .section-head { max-width: 650px; margin-bottom: 20px; }
@@ -245,6 +252,8 @@ footer { display: flex; align-items: center; justify-content: space-between; gap
   .baseline-facts { grid-template-columns: 1fr; }
   .incident-row { align-items: stretch; flex-direction: column; }
   .incident-row .button { width: 100%; }
+  .report-list li { align-items: stretch; flex-direction: column; }
+  .report-list .button { width: 100%; }
   .consent-actions { align-items: stretch; flex-direction: column; }
   .consent-actions .button { width: 100%; }
   .consent-dialog { padding: 19px; }
