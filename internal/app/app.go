@@ -11,17 +11,21 @@ import (
 	"sync"
 	"time"
 
+	"fiberpulse.dev/agent/internal/baseline"
 	"fiberpulse.dev/agent/internal/confidence"
 	"fiberpulse.dev/agent/internal/health"
+	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/localapi"
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/network"
 	"fiberpulse.dev/agent/internal/reporting"
 	"fiberpulse.dev/agent/internal/scheduler"
 	"fiberpulse.dev/agent/internal/storage"
+	"github.com/google/uuid"
 )
 
 const consentPolicyVersion = "privacy-v1"
+const incidentRuntimeSetting = "incident_runtime_v1"
 
 type Config struct {
 	Version                 string
@@ -49,6 +53,9 @@ type App struct {
 	nextRun    time.Time
 	lastHealth health.Sample
 	lastError  string
+	incidentMu sync.Mutex
+	incident   incidents.Machine
+	current    incidents.Record
 	testMu     sync.Mutex
 	wg         sync.WaitGroup
 	closing    bool
@@ -69,7 +76,14 @@ type Snapshot struct {
 	Measurements      []measurement.Result `json:"measurements"`
 	ShareQueueCount   int                  `json:"share_queue_count"`
 	SharingAvailable  bool                 `json:"sharing_available"`
+	Baseline          baseline.Result      `json:"baseline"`
+	Incidents         []incidents.Record   `json:"incidents"`
 	LastError         string               `json:"last_error,omitempty"`
+}
+
+type persistedIncidentRuntime struct {
+	Machine incidents.Snapshot `json:"machine"`
+	Current incidents.Record   `json:"current"`
 }
 
 func New(config Config) (*App, error) {
@@ -89,6 +103,11 @@ func New(config Config) (*App, error) {
 	a.health = health.Checker{Inspector: inspector, DNSName: config.DNSName, ProbeURL: config.ProbeURL}
 	a.scheduler = scheduler.Scheduler{Store: store}
 	a.local = localapi.New(a)
+	if err := a.restoreIncidentRuntime(context.Background()); err != nil {
+		cancel()
+		_ = store.Close()
+		return nil, err
+	}
 	return a, nil
 }
 
@@ -183,9 +202,14 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	queue, _ := a.store.ShareQueueCount(ctx)
+	recentIncidents, err := a.store.ListIncidents(ctx, 100)
+	if err != nil {
+		return nil, err
+	}
+	personalBaseline := calculateBaseline(results)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return Snapshot{Version: a.config.Version, State: a.state, TestState: a.testState, Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, LastError: a.lastError}, nil
+	return Snapshot{Version: a.config.Version, State: a.state, TestState: a.testState, Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, LastError: a.lastError}, nil
 }
 
 func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) error {
@@ -230,6 +254,14 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 	case "quit":
 		a.cancel()
 		return nil
+	case "incident-dismiss":
+		var body struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return err
+		}
+		return a.dismissIncident(ctx, body.ID)
 	default:
 		return fmt.Errorf("unknown action %q", name)
 	}
@@ -376,10 +408,25 @@ func (a *App) healthLoop() {
 }
 func (a *App) captureHealth() {
 	sample := a.health.Check(a.ctx)
+	if err := a.processHealthSample(context.Background(), sample); err != nil {
+		a.mu.Lock()
+		a.lastError = err.Error()
+		a.mu.Unlock()
+		a.config.Logger.Error("health sample persistence failed", "error", err)
+	}
+}
+
+func (a *App) processHealthSample(ctx context.Context, sample health.Sample) error {
+	if sample.At.IsZero() {
+		sample.At = time.Now().UTC()
+	}
 	a.mu.Lock()
 	a.lastHealth = sample
 	a.mu.Unlock()
-	_ = a.store.SaveHealth(context.Background(), sample)
+	if err := a.store.SaveHealth(ctx, sample); err != nil {
+		return err
+	}
+	return a.observeIncident(ctx, sample)
 }
 
 func (a *App) schedulerLoop() {
@@ -426,6 +473,108 @@ func randomUnit() float64 {
 		return .5
 	}
 	return float64(binary.BigEndian.Uint64(b[:])>>11) / float64(uint64(1)<<53)
+}
+
+func calculateBaseline(results []measurement.Result) baseline.Result {
+	samples := make([]baseline.Sample, 0, len(results))
+	for _, result := range results {
+		samples = append(samples, baseline.Sample{
+			At:             result.StartedAt,
+			DownloadBPS:    result.DownloadBPS,
+			UploadBPS:      result.UploadBPS,
+			MinRTTUS:       result.MinRTTUS,
+			HighConfidence: result.Status == measurement.StatusComplete && result.ConfidenceLevel == "high",
+		})
+	}
+	return baseline.Calculate(samples)
+}
+
+func (a *App) restoreIncidentRuntime(ctx context.Context) error {
+	var persisted persistedIncidentRuntime
+	found, err := a.store.GetSetting(ctx, incidentRuntimeSetting, &persisted)
+	if err != nil {
+		return fmt.Errorf("restore incident runtime: %w", err)
+	}
+	if !found {
+		return nil
+	}
+	if err := a.incident.Restore(persisted.Machine); err != nil {
+		return fmt.Errorf("restore incident machine: %w", err)
+	}
+	a.current = persisted.Current
+	return nil
+}
+
+func (a *App) observeIncident(ctx context.Context, sample health.Sample) error {
+	a.incidentMu.Lock()
+	defer a.incidentMu.Unlock()
+	previousMachine := a.incident.Snapshot()
+	previousCurrent := a.current
+	degraded := sample.State == "offline" || sample.State == "internet_degraded"
+	category := sample.Category
+	if category == "" {
+		category = "unknown"
+	}
+	previous := a.incident.State
+	state := a.incident.Observe(incidents.Observation{At: sample.At.UTC(), Degraded: degraded, Category: category})
+	var incidentToSave *incidents.Record
+	var incidentToDelete string
+	if previous != state {
+		switch state {
+		case incidents.Suspected:
+			a.current = incidents.Record{ID: uuid.NewString(), Category: a.incident.Category, State: state, SuspectedAt: a.incident.SuspectedAt, UpdatedAt: sample.At.UTC()}
+		case incidents.Active:
+			a.current.State = state
+			if a.current.ActiveAt.IsZero() {
+				a.current.ActiveAt = sample.At.UTC()
+			}
+			a.current.UpdatedAt = sample.At.UTC()
+		case incidents.Recovering:
+			a.current.State = state
+			a.current.RecoveringAt = sample.At.UTC()
+			a.current.UpdatedAt = sample.At.UTC()
+		case incidents.Resolved:
+			a.current.State = state
+			a.current.ResolvedAt = sample.At.UTC()
+			a.current.UpdatedAt = sample.At.UTC()
+		case incidents.None:
+			if previous == incidents.Suspected {
+				incidentToDelete = a.current.ID
+				a.current = incidents.Record{}
+			}
+		}
+		if a.current.ID != "" {
+			incidentToSave = &a.current
+		}
+	}
+	runtime := persistedIncidentRuntime{Machine: a.incident.Snapshot(), Current: a.current}
+	if err := a.store.PersistIncidentRuntime(ctx, incidentToSave, incidentToDelete, incidentRuntimeSetting, runtime); err != nil {
+		if restoreErr := a.incident.Restore(previousMachine); restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("restore incident state after persistence failure: %w", restoreErr))
+		}
+		a.current = previousCurrent
+		return err
+	}
+	return nil
+}
+
+func (a *App) dismissIncident(ctx context.Context, id string) error {
+	a.incidentMu.Lock()
+	defer a.incidentMu.Unlock()
+	if id == "" || a.current.ID != id || a.incident.State != incidents.Active {
+		return errors.New("only the active incident can be dismissed")
+	}
+	dismissed := a.current
+	dismissed.State = incidents.Dismissed
+	dismissed.UpdatedAt = time.Now().UTC()
+	reset := incidents.Machine{State: incidents.None}
+	runtime := persistedIncidentRuntime{Machine: reset.Snapshot(), Current: incidents.Record{}}
+	if err := a.store.PersistIncidentRuntime(ctx, &dismissed, "", incidentRuntimeSetting, runtime); err != nil {
+		return err
+	}
+	a.incident = reset
+	a.current = incidents.Record{}
+	return nil
 }
 
 func sharedMeasurement(r measurement.Result) map[string]any {

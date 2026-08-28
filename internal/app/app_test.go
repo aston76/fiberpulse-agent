@@ -2,10 +2,13 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"fiberpulse.dev/agent/internal/health"
+	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/scheduler"
 	"fiberpulse.dev/agent/internal/storage"
@@ -112,5 +115,92 @@ func TestSharingCannotBeEnabledWithoutATransport(t *testing.T) {
 	consent, readErr := a.store.CurrentConsent(context.Background(), "fiberpulse")
 	if readErr != nil || consent.Granted {
 		t.Fatalf("consent=%+v err=%v", consent, readErr)
+	}
+}
+
+func TestIncidentLifecyclePersistsAcrossRestartAndCanBeDismissed(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fiberpulse.db")
+	first, err := New(Config{Version: "test", DatabasePath: path, Provider: &measurement.FakeProvider{Delay: time.Millisecond}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	degraded := func(at time.Time) health.Sample {
+		return health.Sample{At: at, State: "internet_degraded", Category: "dns", Network: measurement.NetworkContext{Online: true}}
+	}
+	if err := first.processHealthSample(ctx, degraded(base)); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.processHealthSample(ctx, degraded(base.Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	if first.incident.State != incidents.Suspected {
+		t.Fatalf("expected suspected before restart, got %s", first.incident.State)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := New(Config{Version: "test", DatabasePath: path, Provider: &measurement.FakeProvider{Delay: time.Millisecond}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if second.incident.State != incidents.Suspected {
+		t.Fatalf("restart lost suspected state: %s", second.incident.State)
+	}
+	if err := second.processHealthSample(ctx, degraded(base.Add(2*time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	if second.incident.State != incidents.Active || second.current.ID == "" {
+		t.Fatalf("incident did not become active: machine=%s record=%+v", second.incident.State, second.current)
+	}
+	id := second.current.ID
+	if err := second.Action(ctx, "incident-dismiss", []byte(`{"id":"`+id+`"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if second.incident.State != incidents.None || second.current.ID != "" {
+		t.Fatalf("dismiss did not reset detector: machine=%s record=%+v", second.incident.State, second.current)
+	}
+	stored, err := second.store.ListIncidents(ctx, 10)
+	if err != nil || len(stored) != 1 || stored[0].State != incidents.Dismissed {
+		t.Fatalf("dismissed incident=%+v err=%v", stored, err)
+	}
+}
+
+func TestSnapshotIncludesPersonalBaseline(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	base := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 10; i++ {
+		result := measurement.Result{
+			ID:                 fmt.Sprintf("baseline-%d", i),
+			Provider:           measurement.ProviderDevelopmentFake,
+			ProtocolVersion:    "fake-v1",
+			ClientVersion:      "test",
+			SchemaVersion:      measurement.SchemaVersion,
+			MethodologyVersion: measurement.MethodologyVersion,
+			ConfidenceVersion:  measurement.ConfidenceVersion,
+			StartedAt:          base.Add(time.Duration(i%3) * 24 * time.Hour).Add(time.Duration(i) * time.Minute),
+			CompletedAt:        base.Add(time.Duration(i%3) * 24 * time.Hour).Add(time.Duration(i)*time.Minute + time.Second),
+			DownloadBPS:        int64(100_000_000 + i*1_000_000),
+			UploadBPS:          20_000_000,
+			MinRTTUS:           12_000,
+			Status:             measurement.StatusComplete,
+			ConfidenceLevel:    "high",
+			ConfidenceScore:    90,
+		}
+		if err := a.store.SaveResult(ctx, result); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := a.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := raw.(Snapshot)
+	if snapshot.Baseline.Maturity != "provisional" || snapshot.Baseline.Count != 10 || snapshot.Baseline.Days != 3 || snapshot.Baseline.DownloadMAD == 0 {
+		t.Fatalf("unexpected baseline: %+v", snapshot.Baseline)
 	}
 }

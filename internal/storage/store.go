@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"fiberpulse.dev/agent/internal/health"
+	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/scheduler"
 	"github.com/google/uuid"
@@ -310,6 +311,114 @@ func (s *Store) ShareQueueCount(ctx context.Context) (int, error) {
 	return count, err
 }
 
+type incidentExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func validateIncident(incident incidents.Record) error {
+	if incident.ID == "" || incident.Category == "" || incident.SuspectedAt.IsZero() {
+		return errors.New("incident id, category and suspected time are required")
+	}
+	switch incident.State {
+	case incidents.Suspected, incidents.Active, incidents.Recovering, incidents.Resolved, incidents.Dismissed:
+	default:
+		return errors.New("invalid persisted incident state")
+	}
+	return nil
+}
+
+func saveIncident(ctx context.Context, executor incidentExecutor, incident incidents.Record) error {
+	if err := validateIncident(incident); err != nil {
+		return err
+	}
+	if incident.UpdatedAt.IsZero() {
+		incident.UpdatedAt = time.Now().UTC()
+	}
+	_, err := executor.ExecContext(ctx, `INSERT INTO incidents(
+		id,category,state,suspected_at,active_at,recovering_at,resolved_at,updated_at
+	) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+		category=excluded.category,state=excluded.state,active_at=excluded.active_at,
+		recovering_at=excluded.recovering_at,resolved_at=excluded.resolved_at,updated_at=excluded.updated_at`,
+		incident.ID, incident.Category, string(incident.State), formatTime(incident.SuspectedAt), nullableTime(incident.ActiveAt),
+		nullableTime(incident.RecoveringAt), nullableTime(incident.ResolvedAt), formatTime(incident.UpdatedAt))
+	return err
+}
+
+func (s *Store) SaveIncident(ctx context.Context, incident incidents.Record) error {
+	return saveIncident(ctx, s.db, incident)
+}
+
+func (s *Store) DeleteIncident(ctx context.Context, id string) error {
+	if id == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, "DELETE FROM incidents WHERE id=?", id)
+	return err
+}
+
+func (s *Store) ListIncidents(ctx context.Context, limit int) ([]incidents.Record, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,category,state,suspected_at,active_at,recovering_at,resolved_at,updated_at
+		FROM incidents ORDER BY suspected_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]incidents.Record, 0)
+	for rows.Next() {
+		var incident incidents.Record
+		var state, suspected, updated string
+		var active, recovering, resolved sql.NullString
+		if err := rows.Scan(&incident.ID, &incident.Category, &state, &suspected, &active, &recovering, &resolved, &updated); err != nil {
+			return nil, err
+		}
+		incident.State = incidents.State(state)
+		incident.SuspectedAt, _ = time.Parse(time.RFC3339Nano, suspected)
+		incident.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		incident.ActiveAt = parseNullableTime(active)
+		incident.RecoveringAt = parseNullableTime(recovering)
+		incident.ResolvedAt = parseNullableTime(resolved)
+		result = append(result, incident)
+	}
+	return result, rows.Err()
+}
+
+// PersistIncidentRuntime commits the visible incident record and its private
+// hysteresis snapshot together, so a crash cannot manufacture or forget
+// evidence between two independent SQLite writes.
+func (s *Store) PersistIncidentRuntime(ctx context.Context, incident *incidents.Record, deleteID, settingKey string, runtime any) error {
+	if settingKey == "" {
+		return errors.New("incident runtime setting key is required")
+	}
+	encoded, err := json.Marshal(runtime)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if deleteID != "" {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM incidents WHERE id=?", deleteID); err != nil {
+			return err
+		}
+	}
+	if incident != nil {
+		if err := saveIncident(ctx, tx, *incident); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,?)
+		ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`,
+		settingKey, string(encoded), formatTime(time.Now().UTC())); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) PurgeExpired(ctx context.Context, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -338,6 +447,19 @@ func formatTime(t time.Time) string {
 		return time.Time{}.UTC().Format(time.RFC3339Nano)
 	}
 	return t.UTC().Format(time.RFC3339Nano)
+}
+func nullableTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return formatTime(t)
+}
+func parseNullableTime(value sql.NullString) time.Time {
+	if !value.Valid {
+		return time.Time{}
+	}
+	parsed, _ := time.Parse(time.RFC3339Nano, value.String)
+	return parsed
 }
 func boolInt(v bool) int {
 	if v {

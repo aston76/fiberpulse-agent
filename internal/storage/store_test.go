@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/scheduler"
 )
@@ -44,6 +45,70 @@ func TestStorePersistsConsentQuotaAndMeasurement(t *testing.T) {
 	}
 	if err := s.IntegrityCheck(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStorePersistsIncidentLifecycle(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	base := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	record := incidents.Record{ID: "incident-1", Category: "dns", State: incidents.Suspected, SuspectedAt: base, UpdatedAt: base}
+	if err := s.SaveIncident(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	record.State = incidents.Active
+	record.ActiveAt = base.Add(2 * time.Minute)
+	record.UpdatedAt = record.ActiveAt
+	if err := s.SaveIncident(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.ListIncidents(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].State != incidents.Active || !stored[0].ActiveAt.Equal(record.ActiveAt) {
+		t.Fatalf("stored incident=%+v", stored)
+	}
+	if err := s.DeleteIncident(ctx, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = s.ListIncidents(ctx, 10)
+	if err != nil || len(stored) != 0 {
+		t.Fatalf("deleted incident remained: %+v err=%v", stored, err)
+	}
+}
+
+func TestPersistIncidentRuntimeIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	base := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	record := incidents.Record{ID: "incident-atomic", Category: "dns", State: incidents.Suspected, SuspectedAt: base, UpdatedAt: base}
+	initialRuntime := map[string]any{"state": "suspected", "bad_count": 2}
+	if err := s.PersistIncidentRuntime(ctx, &record, "", "incident_runtime_test", initialRuntime); err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := record
+	invalid.State = incidents.None
+	if err := s.PersistIncidentRuntime(ctx, &invalid, record.ID, "incident_runtime_test", map[string]any{"state": "none"}); err == nil {
+		t.Fatal("invalid incident unexpectedly committed")
+	}
+	stored, err := s.ListIncidents(ctx, 10)
+	if err != nil || len(stored) != 1 || stored[0].State != incidents.Suspected {
+		t.Fatalf("incident transaction did not roll back: %+v err=%v", stored, err)
+	}
+	var runtime map[string]any
+	found, err := s.GetSetting(ctx, "incident_runtime_test", &runtime)
+	if err != nil || !found || runtime["state"] != "suspected" || runtime["bad_count"] != float64(2) {
+		t.Fatalf("runtime transaction did not roll back: found=%v runtime=%+v err=%v", found, runtime, err)
 	}
 }
 

@@ -27,3 +27,26 @@ func TestIncidentHysteresis(t *testing.T) {
 		t.Fatalf("expected resolved, got %s", got)
 	}
 }
+
+func TestIncidentHysteresisSurvivesRestart(t *testing.T) {
+	base := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	original := &Machine{}
+	original.Observe(Observation{At: base, Degraded: true, Category: "dns"})
+	if got := original.Observe(Observation{At: base.Add(time.Minute), Degraded: true, Category: "dns"}); got != Suspected {
+		t.Fatalf("expected suspected before restart, got %s", got)
+	}
+	var restored Machine
+	if err := restored.Restore(original.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if got := restored.Observe(Observation{At: base.Add(2 * time.Minute), Degraded: true, Category: "dns"}); got != Active {
+		t.Fatalf("restart lost hysteresis evidence: %s", got)
+	}
+}
+
+func TestIncidentRestoreRejectsInvalidState(t *testing.T) {
+	var machine Machine
+	if err := machine.Restore(Snapshot{State: "invented"}); err == nil {
+		t.Fatal("invalid persisted incident state was accepted")
+	}
+}

@@ -44,13 +44,14 @@ func Calculate(samples []Sample) Result {
 		}
 	}
 	maturity := "insufficient"
-	if len(down) >= 10 && len(days) >= 3 {
+	qualified := len(down) >= 10 && len(days) >= 3
+	if qualified {
 		maturity = "provisional"
 	}
-	if !first.IsZero() && last.Sub(first) >= 14*24*time.Hour {
+	if qualified && last.Sub(first) >= 14*24*time.Hour {
 		maturity = "mature"
 	}
-	if !first.IsZero() && last.Sub(first) >= 28*24*time.Hour {
+	if qualified && last.Sub(first) >= 28*24*time.Hour {
 		maturity = "time_profile_ready"
 	}
 	return Result{Maturity: maturity, Count: len(down), Days: len(days), DownloadMedian: median(down), DownloadMAD: mad(down), UploadMedian: median(up), MinRTTMedian: median(rtt)}
