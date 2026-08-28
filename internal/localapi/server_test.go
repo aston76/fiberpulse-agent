@@ -93,6 +93,21 @@ func TestBootstrapSessionHostAndCSRF(t *testing.T) {
 		t.Fatalf("valid action status=%d actions=%d", response.StatusCode, controller.actions)
 	}
 	response.Body.Close()
+	exportURL := server.BaseURL() + "/api/v1/export/csv"
+	request, _ = http.NewRequest(http.MethodGet, exportURL, nil)
+	request.AddCookie(cookies[0])
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || string(exported) != "ok" {
+		t.Fatalf("export status=%d body=%q", response.StatusCode, exported)
+	}
+	if disposition := response.Header.Get("Content-Disposition"); disposition != "attachment; filename=fiberpulse-report.csv" {
+		t.Fatalf("unexpected content disposition %q", disposition)
+	}
 	parsed, _ := url.Parse(statusURL)
 	request, _ = http.NewRequest(http.MethodGet, statusURL, nil)
 	request.Host = "attacker.invalid"

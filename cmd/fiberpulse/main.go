@@ -76,7 +76,18 @@ func run() error {
 	} else {
 		defer stopShutdownListener()
 	}
-	actions := platform.TrayActions{Open: func() { _ = platform.OpenURL(agent.BootstrapURL()) }, Test: func() { _ = agent.StartTest(context.Background(), "manual") }, Pause: func() {}, Report: func() { _ = platform.OpenURL(agent.BootstrapURL()) }, Update: func() {}, Quit: func() { _ = agent.Action(context.Background(), "quit", []byte(`{}`)) }}
+	actions := platform.TrayActions{
+		Open: func() { _ = platform.OpenURL(agent.BootstrapURL()) },
+		Test: func() { _ = agent.StartTest(context.Background(), "manual") },
+		Pause: func() {
+			if err := agent.TogglePause(context.Background()); err != nil {
+				logger.Warn("tray pause action failed", "error", err)
+			}
+		},
+		Report: func() { _ = platform.OpenURL(agent.BootstrapURL()) },
+		Update: func() { logger.Info("interactive update check is not configured in this development build") },
+		Quit:   func() { _ = agent.Action(context.Background(), "quit", []byte(`{}`)) },
+	}
 	if err := platform.OpenURL(url); err != nil {
 		logger.Info("open the dashboard manually", "url", url, "error", err)
 	}

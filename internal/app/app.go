@@ -196,16 +196,7 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 		if err := json.Unmarshal(raw, &body); err != nil {
 			return err
 		}
-		a.mu.Lock()
-		a.paused = body.Paused
-		if body.Paused {
-			a.state = "paused"
-		} else {
-			a.state = "monitoring"
-		}
-		next := a.nextRun
-		a.mu.Unlock()
-		return a.store.SetScheduler(ctx, "waiting", next, body.Paused)
+		return a.SetPaused(ctx, body.Paused)
 	case "consent":
 		var body struct {
 			Scope    string `json:"scope"`
@@ -234,6 +225,35 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 	default:
 		return fmt.Errorf("unknown action %q", name)
 	}
+}
+
+// SetPaused persists the scheduler decision before publishing it to the rest of
+// the application. This keeps tray and dashboard actions on the same code path.
+func (a *App) SetPaused(ctx context.Context, paused bool) error {
+	a.mu.RLock()
+	next := a.nextRun
+	a.mu.RUnlock()
+	if err := a.store.SetScheduler(ctx, "waiting", next, paused); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.paused = paused
+	if paused {
+		a.state = "paused"
+	} else {
+		a.state = "monitoring"
+	}
+	a.mu.Unlock()
+	return nil
+}
+
+// TogglePause is used by native tray implementations, which expose a single
+// pause/resume command rather than a stateful switch.
+func (a *App) TogglePause(ctx context.Context) error {
+	a.mu.RLock()
+	paused := !a.paused
+	a.mu.RUnlock()
+	return a.SetPaused(ctx, paused)
 }
 
 func (a *App) Export(ctx context.Context, format string) ([]byte, string, error) {
