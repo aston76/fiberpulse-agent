@@ -270,7 +270,7 @@ func (s *Store) GetSetting(ctx context.Context, key string, target any) (bool, e
 	return true, json.Unmarshal([]byte(raw), target)
 }
 
-func (s *Store) SetScheduler(ctx context.Context, state string, next time.Time, paused bool) error {
+func (s *Store) SetScheduler(ctx context.Context, state scheduler.State, next time.Time, paused bool) error {
 	var nextValue any
 	if !next.IsZero() {
 		nextValue = formatTime(next)
@@ -279,7 +279,7 @@ func (s *Store) SetScheduler(ctx context.Context, state string, next time.Time, 
 	return err
 }
 
-func (s *Store) Scheduler(ctx context.Context) (state string, next time.Time, paused bool, err error) {
+func (s *Store) Scheduler(ctx context.Context) (state scheduler.State, next time.Time, paused bool, err error) {
 	var nextRaw sql.NullString
 	var pausedInt int
 	err = s.db.QueryRowContext(ctx, "SELECT state,next_run_at,paused FROM scheduler_state WHERE singleton=1").Scan(&state, &nextRaw, &pausedInt)

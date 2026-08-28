@@ -27,6 +27,8 @@ import (
 const consentPolicyVersion = "privacy-v1"
 const incidentRuntimeSetting = "incident_runtime_v1"
 
+var ErrMeasurementBusy = errors.New("a measurement is already running")
+
 type Config struct {
 	Version                 string
 	DatabasePath            string
@@ -44,11 +46,13 @@ type App struct {
 	health      health.Checker
 	local       *localapi.Server
 	scheduler   scheduler.Scheduler
+	schedulerMu sync.Mutex
 	ctx         context.Context
 	cancel      context.CancelFunc
 	mu          sync.RWMutex
 	lifecycle   LifecycleMachine
 	testMachine measurement.TestMachine
+	schedule    scheduler.Machine
 	paused      bool
 	nextRun     time.Time
 	lastHealth  health.Sample
@@ -57,6 +61,7 @@ type App struct {
 	incident    incidents.Machine
 	current     incidents.Record
 	testMu      sync.Mutex
+	testKind    scheduler.Kind
 	wg          sync.WaitGroup
 	closing     bool
 	closeOnce   sync.Once
@@ -67,6 +72,7 @@ type Snapshot struct {
 	Version           string               `json:"version"`
 	State             string               `json:"state"`
 	TestState         string               `json:"test_state"`
+	SchedulerState    string               `json:"scheduler_state"`
 	Paused            bool                 `json:"paused"`
 	NextAutomaticTest time.Time            `json:"next_automatic_test,omitempty"`
 	Provider          measurement.Metadata `json:"provider"`
@@ -100,7 +106,7 @@ func New(config Config) (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	inspector := network.SystemInspector{}
-	a := &App{config: config, store: store, inspector: inspector, ctx: ctx, cancel: cancel, lifecycle: LifecycleMachine{State: LifecycleStarting}, testMachine: measurement.TestMachine{State: measurement.TestIdle}}
+	a := &App{config: config, store: store, inspector: inspector, ctx: ctx, cancel: cancel, lifecycle: LifecycleMachine{State: LifecycleStarting}, testMachine: measurement.TestMachine{State: measurement.TestIdle}, schedule: scheduler.Machine{State: scheduler.Recovered}}
 	a.health = health.Checker{Inspector: inspector, DNSName: config.DNSName, ProbeURL: config.ProbeURL}
 	a.scheduler = scheduler.Scheduler{Store: store}
 	a.local = localapi.New(a)
@@ -123,13 +129,19 @@ func (a *App) Start() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if next.IsZero() || next.Before(time.Now().UTC()) {
-		next = time.Now().UTC().Add(scheduler.RecoveryDelay(randomUnit()))
-		_ = a.store.SetScheduler(a.ctx, "recovered", next, paused)
+	now := time.Now().UTC()
+	minimumNext := now.Add(scheduler.RecoveryDelay(randomUnit()))
+	if next.IsZero() || next.Before(minimumNext) {
+		next = minimumNext
+	}
+	schedulerState := scheduler.Waiting
+	if paused || !mlab.Granted {
+		schedulerState = scheduler.Disabled
+	}
+	if err := a.setSchedulerState(a.ctx, schedulerState, next, paused); err != nil {
+		return "", err
 	}
 	a.mu.Lock()
-	a.paused = paused
-	a.nextRun = next
 	stateErr := a.syncLifecycleLocked(mlab.Granted)
 	a.mu.Unlock()
 	if stateErr != nil {
@@ -175,8 +187,8 @@ func (a *App) Close() error {
 		}()
 		select {
 		case <-done:
-			_ = a.store.SetScheduler(ctx, "stopped", next, paused)
-			a.closeErr = errors.Join(a.closeErr, serverErr, a.store.Close())
+			schedulerErr := a.setSchedulerState(ctx, scheduler.Stopped, next, paused)
+			a.closeErr = errors.Join(a.closeErr, serverErr, schedulerErr, a.store.Close())
 			a.mu.Lock()
 			if err := a.lifecycle.Transition(LifecycleStopped); err != nil {
 				a.closeErr = errors.Join(a.closeErr, err)
@@ -224,7 +236,7 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 	personalBaseline := calculateBaseline(results)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return Snapshot{Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
+	return Snapshot{Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
 }
 
 func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) error {
@@ -248,18 +260,39 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 		if err := json.Unmarshal(raw, &body); err != nil {
 			return err
 		}
+		if body.Scope != "mlab" && body.Scope != "fiberpulse" {
+			return errors.New("unsupported consent scope")
+		}
 		if body.Scope == "fiberpulse" && body.Granted && !a.config.SharingTransportEnabled {
 			return errors.New("FiberPulse sharing is unavailable in this development build")
+		}
+		if body.Scope == "mlab" {
+			a.testMu.Lock()
+			defer a.testMu.Unlock()
 		}
 		if err := a.store.SetConsent(ctx, storage.Consent{Scope: body.Scope, Granted: body.Granted, PolicyVersion: consentPolicyVersion, Language: body.Language, Source: "local_dashboard"}); err != nil {
 			return err
 		}
 		var stateErr error
-		a.mu.Lock()
 		if body.Scope == "mlab" {
+			a.mu.RLock()
+			next := a.nextRun
+			paused := a.paused
+			activeAutomatic := a.testMachine.State != measurement.TestIdle && a.testKind == scheduler.Automatic
+			a.mu.RUnlock()
+			target := scheduler.Waiting
+			if !body.Granted || paused {
+				target = scheduler.Disabled
+			} else if activeAutomatic {
+				target = scheduler.Running
+			}
+			if err := a.setSchedulerState(ctx, target, next, paused); err != nil {
+				return err
+			}
+			a.mu.Lock()
 			stateErr = a.syncLifecycleLocked(body.Granted)
+			a.mu.Unlock()
 		}
-		a.mu.Unlock()
 		return stateErr
 	case "quit":
 		a.cancel()
@@ -288,21 +321,49 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 // SetPaused persists the scheduler decision before publishing it to the rest of
 // the application. This keeps tray and dashboard actions on the same code path.
 func (a *App) SetPaused(ctx context.Context, paused bool) error {
+	a.testMu.Lock()
+	defer a.testMu.Unlock()
 	a.mu.RLock()
 	next := a.nextRun
+	activeAutomatic := a.testMachine.State != measurement.TestIdle && a.testKind == scheduler.Automatic
 	a.mu.RUnlock()
 	consent, err := a.store.CurrentConsent(ctx, "mlab")
 	if err != nil {
 		return err
 	}
-	if err := a.store.SetScheduler(ctx, "waiting", next, paused); err != nil {
+	target := scheduler.Waiting
+	if paused || !consent.Granted {
+		target = scheduler.Disabled
+	} else if activeAutomatic {
+		target = scheduler.Running
+	}
+	if err := a.setSchedulerState(ctx, target, next, paused); err != nil {
 		return err
 	}
 	a.mu.Lock()
-	a.paused = paused
 	err = a.syncLifecycleLocked(consent.Granted)
 	a.mu.Unlock()
 	return err
+}
+
+func (a *App) setSchedulerState(ctx context.Context, target scheduler.State, next time.Time, paused bool) error {
+	a.schedulerMu.Lock()
+	defer a.schedulerMu.Unlock()
+	a.mu.RLock()
+	machine := a.schedule
+	a.mu.RUnlock()
+	if err := machine.Transition(target); err != nil {
+		return err
+	}
+	if err := a.store.SetScheduler(ctx, target, next, paused); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.schedule = machine
+	a.nextRun = next
+	a.paused = paused
+	a.mu.Unlock()
+	return nil
 }
 
 func (a *App) syncLifecycleLocked(consentGranted bool) error {
@@ -459,7 +520,7 @@ func (a *App) StartTest(ctx context.Context, kind scheduler.Kind) error {
 	networkContext := a.lastHealth.Network
 	a.mu.RUnlock()
 	if busy {
-		return errors.New("a measurement is already running")
+		return ErrMeasurementBusy
 	}
 	if err := a.transitionTest(measurement.TestPreflight); err != nil {
 		return err
@@ -475,13 +536,38 @@ func (a *App) StartTest(ctx context.Context, kind scheduler.Kind) error {
 	if !preflight.Eligible {
 		return a.rejectTestStart(measurement.ErrNetworkIneligible)
 	}
+	if kind == scheduler.Automatic {
+		a.mu.RLock()
+		scheduleState := a.schedule.State
+		next := a.nextRun
+		paused := a.paused
+		a.mu.RUnlock()
+		if scheduleState != scheduler.Due {
+			if err := a.setSchedulerState(ctx, scheduler.Due, next, paused); err != nil {
+				return a.rejectTestStart(err)
+			}
+		}
+	}
 	if err := a.scheduler.Reserve(ctx, kind); err != nil {
 		return a.rejectTestStart(err)
 	}
 	if err := a.transitionTest(measurement.TestQuotaReserved); err != nil {
 		return a.rejectTestStart(err)
 	}
+	if kind == scheduler.Automatic {
+		a.mu.RLock()
+		next := a.nextRun
+		paused := a.paused
+		a.mu.RUnlock()
+		if err := a.setSchedulerState(ctx, scheduler.Running, next, paused); err != nil {
+			a.mu.Lock()
+			a.lastError = err.Error()
+			a.mu.Unlock()
+			a.config.Logger.Error("scheduler running state persistence failed after quota reservation", "error", err)
+		}
+	}
 	a.mu.Lock()
+	a.testKind = kind
 	a.wg.Add(1)
 	a.mu.Unlock()
 	go func() {
@@ -550,16 +636,39 @@ func (a *App) runTest(kind scheduler.Kind, before measurement.NetworkContext) {
 		runErr = errors.Join(runErr, err)
 	}
 	a.mu.Lock()
-	if runErr != nil {
-		a.lastError = runErr.Error()
-	}
 	if kind == scheduler.Automatic {
 		a.nextRun = time.Now().UTC().Add(scheduler.NextInterval(2, randomUnit()))
 	}
 	next := a.nextRun
 	paused := a.paused
+	a.testKind = ""
 	a.mu.Unlock()
-	_ = a.store.SetScheduler(context.Background(), "waiting", next, paused)
+	if kind == scheduler.Automatic {
+		a.mu.RLock()
+		scheduleState := a.schedule.State
+		a.mu.RUnlock()
+		if scheduleState == scheduler.Running {
+			if err := a.setSchedulerState(context.Background(), scheduler.Cooldown, next, paused); err != nil {
+				runErr = errors.Join(runErr, err)
+			}
+		}
+		mlab, consentErr := a.store.CurrentConsent(context.Background(), "mlab")
+		if consentErr != nil {
+			runErr = errors.Join(runErr, consentErr)
+		}
+		target := scheduler.Waiting
+		if paused || consentErr != nil || !mlab.Granted {
+			target = scheduler.Disabled
+		}
+		if err := a.setSchedulerState(context.Background(), target, next, paused); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+	}
+	a.mu.Lock()
+	if runErr != nil {
+		a.lastError = runErr.Error()
+	}
+	a.mu.Unlock()
 	a.config.Logger.Info("measurement completed", "kind", kind, "status", result.Status, "share_queued", queued, "error", runErr)
 }
 
@@ -618,21 +727,54 @@ func (a *App) schedulerLoop() {
 			return
 		case <-ticker.C:
 			a.mu.RLock()
-			due := !a.paused && !a.nextRun.IsZero() && !time.Now().UTC().Before(a.nextRun) && a.testMachine.State == measurement.TestIdle
+			now := time.Now().UTC()
+			due := !a.paused && !a.nextRun.IsZero() && !now.Before(a.nextRun) && a.testMachine.State == measurement.TestIdle && a.schedule.CanBecomeDue()
+			next := a.nextRun
+			paused := a.paused
 			a.mu.RUnlock()
 			if due {
-				if err := a.StartTest(a.ctx, scheduler.Automatic); err != nil {
+				if err := a.setSchedulerState(a.ctx, scheduler.Due, next, paused); err != nil {
 					a.mu.Lock()
 					a.lastError = err.Error()
-					a.nextRun = time.Now().UTC().Add(time.Hour)
-					next := a.nextRun
-					paused := a.paused
 					a.mu.Unlock()
-					_ = a.store.SetScheduler(context.Background(), "blocked", next, paused)
+					continue
+				}
+				if err := a.StartTest(a.ctx, scheduler.Automatic); err != nil {
+					a.handleAutomaticStartFailure(err, now)
 				}
 			}
 		}
 	}
+}
+
+func (a *App) handleAutomaticStartFailure(cause error, now time.Time) {
+	a.mu.RLock()
+	networkContext := a.lastHealth.Network
+	paused := a.paused
+	a.mu.RUnlock()
+	mlab, consentErr := a.store.CurrentConsent(context.Background(), "mlab")
+	cause = errors.Join(cause, consentErr)
+	target := scheduler.Waiting
+	next := now.Add(time.Hour)
+	switch {
+	case paused || consentErr != nil || !mlab.Granted || errors.Is(cause, measurement.ErrConsentRequired):
+		target = scheduler.Disabled
+		next = now.Add(scheduler.RecoveryDelay(randomUnit()))
+	case networkContext.Metered || networkContext.Roaming:
+		target = scheduler.BlockedMetered
+		next = now.Add(15 * time.Minute)
+	case errors.Is(cause, scheduler.ErrAutomaticQuota) || errors.Is(cause, scheduler.ErrTotalQuota):
+		target = scheduler.BlockedQuota
+	case errors.Is(cause, ErrMeasurementBusy):
+		target = scheduler.DeferredBusy
+		next = now.Add(5 * time.Minute)
+	}
+	if err := a.setSchedulerState(context.Background(), target, next, paused); err != nil {
+		cause = errors.Join(cause, err)
+	}
+	a.mu.Lock()
+	a.lastError = cause.Error()
+	a.mu.Unlock()
 }
 func (a *App) retentionLoop() {
 	ticker := time.NewTicker(24 * time.Hour)

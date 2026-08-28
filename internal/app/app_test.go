@@ -76,6 +76,132 @@ func TestStartRestoresPersistedPausedState(t *testing.T) {
 	}
 }
 
+func TestStartRepairsStoppedSchedulerStateWithoutAdvancingFutureRun(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	if err := a.store.SetConsent(ctx, storage.Consent{Scope: "mlab", Granted: true, PolicyVersion: consentPolicyVersion}); err != nil {
+		t.Fatal(err)
+	}
+	next := time.Now().UTC().Add(2 * time.Hour).Round(time.Second)
+	if err := a.store.SetScheduler(ctx, scheduler.Stopped, next, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Start(); err != nil {
+		t.Fatal(err)
+	}
+	state, storedNext, paused, err := a.store.Scheduler(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != scheduler.Waiting || paused || !storedNext.Equal(next) {
+		t.Fatalf("state=%s next=%s paused=%v", state, storedNext, paused)
+	}
+}
+
+func TestStartDisablesAutomaticSchedulerWithoutConsent(t *testing.T) {
+	a := newTestApp(t)
+	if _, err := a.Start(); err != nil {
+		t.Fatal(err)
+	}
+	state, _, _, err := a.store.Scheduler(context.Background())
+	if err != nil || state != scheduler.Disabled {
+		t.Fatalf("state=%s err=%v", state, err)
+	}
+}
+
+func TestPausedManualMeasurementDoesNotReenableAutomaticScheduler(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	if err := a.store.SetConsent(ctx, storage.Consent{Scope: "mlab", Granted: true, PolicyVersion: consentPolicyVersion}); err != nil {
+		t.Fatal(err)
+	}
+	a.lastHealth.Network = measurement.NetworkContext{Online: true, ConnectionType: measurement.ConnectionEthernet}
+	if err := a.SetPaused(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StartTest(ctx, scheduler.Manual); err != nil {
+		t.Fatal(err)
+	}
+	a.wg.Wait()
+	state, _, paused, err := a.store.Scheduler(ctx)
+	if err != nil || state != scheduler.Disabled || !paused {
+		t.Fatalf("state=%s paused=%v err=%v", state, paused, err)
+	}
+}
+
+func TestAutomaticFailurePersistsMeteredBlock(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	if err := a.store.SetConsent(ctx, storage.Consent{Scope: "mlab", Granted: true, PolicyVersion: consentPolicyVersion}); err != nil {
+		t.Fatal(err)
+	}
+	a.schedule.State = scheduler.Due
+	a.lastHealth.Network = measurement.NetworkContext{Online: true, Metered: true}
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	a.handleAutomaticStartFailure(measurement.ErrNetworkIneligible, now)
+	state, next, _, err := a.store.Scheduler(ctx)
+	if err != nil || state != scheduler.BlockedMetered || !next.Equal(now.Add(15*time.Minute)) {
+		t.Fatalf("state=%s next=%s err=%v", state, next, err)
+	}
+}
+
+type blockingPreflightProvider struct {
+	measurement.FakeProvider
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingPreflightProvider) Preflight(ctx context.Context, network measurement.NetworkContext, consent bool) (measurement.PreflightResult, error) {
+	close(p.entered)
+	select {
+	case <-ctx.Done():
+		return measurement.PreflightResult{}, ctx.Err()
+	case <-p.release:
+		return p.FakeProvider.Preflight(ctx, network, consent)
+	}
+}
+
+func TestPauseCannotRaceAutomaticReservation(t *testing.T) {
+	a := newTestApp(t)
+	provider := &blockingPreflightProvider{FakeProvider: measurement.FakeProvider{Delay: time.Millisecond}, entered: make(chan struct{}), release: make(chan struct{})}
+	a.config.Provider = provider
+	a.schedule.State = scheduler.Waiting
+	ctx := context.Background()
+	if err := a.store.SetConsent(ctx, storage.Consent{Scope: "mlab", Granted: true, PolicyVersion: consentPolicyVersion}); err != nil {
+		t.Fatal(err)
+	}
+	a.lastHealth.Network = measurement.NetworkContext{Online: true, ConnectionType: measurement.ConnectionEthernet}
+	startResult := make(chan error, 1)
+	go func() { startResult <- a.StartTest(ctx, scheduler.Automatic) }()
+	<-provider.entered
+	pauseResult := make(chan error, 1)
+	go func() { pauseResult <- a.SetPaused(ctx, true) }()
+	select {
+	case err := <-pauseResult:
+		t.Fatalf("pause bypassed in-progress reservation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(provider.release)
+	if err := <-startResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-pauseResult; err != nil {
+		t.Fatal(err)
+	}
+	a.wg.Wait()
+	state, _, paused, err := a.store.Scheduler(ctx)
+	if err != nil || state != scheduler.Disabled || !paused {
+		t.Fatalf("state=%s paused=%v err=%v", state, paused, err)
+	}
+}
+
+func TestConsentRejectsUnknownScope(t *testing.T) {
+	a := newTestApp(t)
+	if err := a.Action(context.Background(), "consent", []byte(`{"scope":"invented","granted":true,"language":"en"}`)); err == nil {
+		t.Fatal("unknown consent scope was stored")
+	}
+}
+
 func TestDevelopmentMeasurementIsLocalOnlyAndKeepsAutomaticSchedule(t *testing.T) {
 	a := newTestApp(t)
 	ctx := context.Background()
