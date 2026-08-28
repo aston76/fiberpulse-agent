@@ -14,6 +14,7 @@ mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=$version" -o "$app_path/Contents/MacOS/fiberpulse" ./cmd/fiberpulse
 CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags="-s -w" -o "$app_path/Contents/MacOS/fiberpulse-updater" ./cmd/fiberpulse-updater
 cp packaging/macos/Info.plist "$app_path/Contents/Info.plist"
+cp packaging/macos/FiberPulse.icns "$app_path/Contents/Resources/FiberPulse.icns"
 cp LICENSE "$app_path/Contents/Resources/LICENSE"
 codesign --force --deep --sign - "$app_path"
 codesign --verify --deep --strict "$app_path"
