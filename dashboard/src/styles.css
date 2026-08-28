@@ -197,7 +197,7 @@ footer { display: flex; align-items: center; justify-content: space-between; gap
 .pulse { width: 10px; height: 10px; border-radius: 50%; background: var(--green); animation: pulse 1.4s infinite; }
 @keyframes pulse { 50% { opacity: .25; transform: scale(.7); } }
 
-@media (max-width: 1120px) {
+@media (max-width: 980px) {
   .topbar nav { display: none; }
   .topbar { grid-template-columns: 1fr auto; }
   .hero { grid-template-columns: 1fr; min-height: auto; }
