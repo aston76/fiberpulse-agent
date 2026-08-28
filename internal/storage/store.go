@@ -156,7 +156,7 @@ func (s *Store) ListResults(ctx context.Context, limit int) ([]measurement.Resul
 		return nil, err
 	}
 	defer rows.Close()
-	var out []measurement.Result
+	out := make([]measurement.Result, 0)
 	for rows.Next() {
 		var r measurement.Result
 		var started, completed, before, after, reasons string

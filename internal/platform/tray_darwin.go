@@ -2,39 +2,58 @@
 
 package platform
 
+/*
+#cgo LDFLAGS: -framework Cocoa
+void FiberPulseTrayRun(void);
+void FiberPulseTrayStop(void);
+*/
+import "C"
+
 import (
-	"github.com/getlantern/systray"
+	"runtime"
+	"sync"
 )
 
+var darwinTrayMu sync.RWMutex
+var darwinTrayActions TrayActions
+
+func init() {
+	runtime.LockOSThread()
+}
+
 func RunTray(actions TrayActions, done <-chan struct{}) error {
+	darwinTrayMu.Lock()
+	darwinTrayActions = actions
+	darwinTrayMu.Unlock()
 	go func() {
 		<-done
-		systray.Quit()
+		C.FiberPulseTrayStop()
 	}()
-	systray.Run(func() {
-		systray.SetTitle("FP")
-		systray.SetTooltip("FiberPulse — measured Internet performance")
-		open := systray.AddMenuItem("Open FiberPulse", "Open the local dashboard")
-		test := systray.AddMenuItem("Run manual test", "Run a consented NDT7 test")
-		pause := systray.AddMenuItem("Pause / resume", "Pause or resume automatic tests")
-		report := systray.AddMenuItem("Open reports", "Open local reporting")
-		update := systray.AddMenuItem("Check for update", "Check the signed update channel")
-		systray.AddSeparator()
-		quit := systray.AddMenuItem("Quit completely", "Stop FiberPulse and all local listeners")
-		go routeMenu(open.ClickedCh, actions.Open)
-		go routeMenu(test.ClickedCh, actions.Test)
-		go routeMenu(pause.ClickedCh, actions.Pause)
-		go routeMenu(report.ClickedCh, actions.Report)
-		go routeMenu(update.ClickedCh, actions.Update)
-		go routeMenu(quit.ClickedCh, actions.Quit)
-	}, func() {})
+	C.FiberPulseTrayRun()
 	return nil
 }
 
-func routeMenu(clicks <-chan struct{}, action func()) {
-	for range clicks {
-		if action != nil {
-			go action()
-		}
+//export fiberPulseTrayAction
+func fiberPulseTrayAction(identifier C.int) {
+	darwinTrayMu.RLock()
+	actions := darwinTrayActions
+	darwinTrayMu.RUnlock()
+	var action func()
+	switch int(identifier) {
+	case 1:
+		action = actions.Open
+	case 2:
+		action = actions.Test
+	case 3:
+		action = actions.Pause
+	case 4:
+		action = actions.Report
+	case 5:
+		action = actions.Update
+	case 6:
+		action = actions.Quit
+	}
+	if action != nil {
+		go action()
 	}
 }
