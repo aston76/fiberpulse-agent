@@ -7,7 +7,7 @@ Update and Quit actions without WebView, Node or Python at runtime.
 
 ## Development bundle
 
-On a macOS build host with Go 1.26:
+On a macOS build host with Go 1.26.7:
 
 ```sh
 chmod +x packaging/macos/build-app.sh

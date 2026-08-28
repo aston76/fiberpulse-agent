@@ -5,7 +5,7 @@ or share FiberPulse data until the corresponding, separate consent is recorded.
 
 ## Development
 
-The supported toolchain is Go 1.26.x and Node 24 LTS. The repository includes
+The supported toolchain is Go 1.26.7 and Node 24 LTS. The repository includes
 containerized build targets so the host does not need either runtime.
 
 ```sh

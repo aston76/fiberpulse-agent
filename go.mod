@@ -1,6 +1,6 @@
 module fiberpulse.dev/agent
 
-go 1.26.0
+go 1.26.7
 
 require (
 	github.com/google/uuid v1.6.0
@@ -20,5 +20,5 @@ require (
 	github.com/m-lab/tcp-info v1.9.0 // indirect
 	github.com/phpdave11/gofpdi v1.0.14-0.20211212211723-1f10f9844311 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	golang.org/x/net v0.49.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 )

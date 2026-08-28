@@ -42,20 +42,20 @@ func TestPauseStateNeverHidesMissingMLabConsent(t *testing.T) {
 	if err := a.SetPaused(ctx, true); err != nil {
 		t.Fatal(err)
 	}
-	if a.state != "consent_required" || !a.paused {
-		t.Fatalf("state=%q paused=%v", a.state, a.paused)
+	if a.lifecycle.State != LifecycleConsentRequired || !a.paused {
+		t.Fatalf("state=%q paused=%v", a.lifecycle.State, a.paused)
 	}
 	if err := a.Action(ctx, "consent", []byte(`{"scope":"mlab","granted":true,"language":"en"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if a.state != "paused" {
-		t.Fatalf("grant while paused produced state %q", a.state)
+	if a.lifecycle.State != LifecyclePaused {
+		t.Fatalf("grant while paused produced state %q", a.lifecycle.State)
 	}
 	if err := a.SetPaused(ctx, false); err != nil {
 		t.Fatal(err)
 	}
-	if a.state != "monitoring" || a.paused {
-		t.Fatalf("state=%q paused=%v", a.state, a.paused)
+	if a.lifecycle.State != LifecycleMonitoring || a.paused {
+		t.Fatalf("state=%q paused=%v", a.lifecycle.State, a.paused)
 	}
 }
 
@@ -71,8 +71,8 @@ func TestStartRestoresPersistedPausedState(t *testing.T) {
 	if _, err := a.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if a.state != "paused" || !a.paused {
-		t.Fatalf("state=%q paused=%v", a.state, a.paused)
+	if a.lifecycle.State != LifecyclePaused || !a.paused {
+		t.Fatalf("state=%q paused=%v", a.lifecycle.State, a.paused)
 	}
 }
 

@@ -1,4 +1,4 @@
-GO_IMAGE ?= golang:1.26-bookworm
+GO_IMAGE ?= golang:1.26.7-bookworm
 NODE_IMAGE ?= node:24-bookworm-slim
 ROOT := $(CURDIR)
 

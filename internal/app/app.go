@@ -47,7 +47,7 @@ type App struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	mu          sync.RWMutex
-	state       string
+	lifecycle   LifecycleMachine
 	testMachine measurement.TestMachine
 	paused      bool
 	nextRun     time.Time
@@ -100,7 +100,7 @@ func New(config Config) (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	inspector := network.SystemInspector{}
-	a := &App{config: config, store: store, inspector: inspector, ctx: ctx, cancel: cancel, state: "starting", testMachine: measurement.TestMachine{State: measurement.TestIdle}}
+	a := &App{config: config, store: store, inspector: inspector, ctx: ctx, cancel: cancel, lifecycle: LifecycleMachine{State: LifecycleStarting}, testMachine: measurement.TestMachine{State: measurement.TestIdle}}
 	a.health = health.Checker{Inspector: inspector, DNSName: config.DNSName, ProbeURL: config.ProbeURL}
 	a.scheduler = scheduler.Scheduler{Store: store}
 	a.local = localapi.New(a)
@@ -130,15 +130,16 @@ func (a *App) Start() (string, error) {
 	a.mu.Lock()
 	a.paused = paused
 	a.nextRun = next
-	if !mlab.Granted {
-		a.state = "consent_required"
-	} else if paused {
-		a.state = "paused"
-	} else {
-		a.state = "monitoring"
-	}
+	stateErr := a.syncLifecycleLocked(mlab.Granted)
 	a.mu.Unlock()
+	if stateErr != nil {
+		return "", stateErr
+	}
 	if err := a.local.Start(); err != nil {
+		a.mu.Lock()
+		_ = a.lifecycle.Transition(LifecycleFailed)
+		a.lastError = err.Error()
+		a.mu.Unlock()
 		return "", err
 	}
 	a.runAsync(a.healthLoop)
@@ -156,7 +157,9 @@ func (a *App) Close() error {
 		a.testMu.Lock()
 		a.mu.Lock()
 		a.closing = true
-		a.state = "stopping"
+		if err := a.lifecycle.Transition(LifecycleStopping); err != nil {
+			a.closeErr = err
+		}
 		next := a.nextRun
 		paused := a.paused
 		a.mu.Unlock()
@@ -173,12 +176,14 @@ func (a *App) Close() error {
 		select {
 		case <-done:
 			_ = a.store.SetScheduler(ctx, "stopped", next, paused)
-			a.closeErr = errors.Join(serverErr, a.store.Close())
+			a.closeErr = errors.Join(a.closeErr, serverErr, a.store.Close())
 			a.mu.Lock()
-			a.state = "stopped"
+			if err := a.lifecycle.Transition(LifecycleStopped); err != nil {
+				a.closeErr = errors.Join(a.closeErr, err)
+			}
 			a.mu.Unlock()
 		case <-ctx.Done():
-			a.closeErr = errors.Join(serverErr, errors.New("graceful shutdown exceeded 10 seconds"))
+			a.closeErr = errors.Join(a.closeErr, serverErr, errors.New("graceful shutdown exceeded 10 seconds"))
 		}
 	})
 	return a.closeErr
@@ -219,7 +224,7 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 	personalBaseline := calculateBaseline(results)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return Snapshot{Version: a.config.Version, State: a.state, TestState: string(a.testMachine.State), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
+	return Snapshot{Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
 }
 
 func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) error {
@@ -249,18 +254,13 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 		if err := a.store.SetConsent(ctx, storage.Consent{Scope: body.Scope, Granted: body.Granted, PolicyVersion: consentPolicyVersion, Language: body.Language, Source: "local_dashboard"}); err != nil {
 			return err
 		}
+		var stateErr error
 		a.mu.Lock()
 		if body.Scope == "mlab" {
-			if !body.Granted {
-				a.state = "consent_required"
-			} else if a.paused {
-				a.state = "paused"
-			} else {
-				a.state = "monitoring"
-			}
+			stateErr = a.syncLifecycleLocked(body.Granted)
 		}
 		a.mu.Unlock()
-		return nil
+		return stateErr
 	case "quit":
 		a.cancel()
 		return nil
@@ -300,15 +300,22 @@ func (a *App) SetPaused(ctx context.Context, paused bool) error {
 	}
 	a.mu.Lock()
 	a.paused = paused
-	if !consent.Granted {
-		a.state = "consent_required"
-	} else if paused {
-		a.state = "paused"
-	} else {
-		a.state = "monitoring"
-	}
+	err = a.syncLifecycleLocked(consent.Granted)
 	a.mu.Unlock()
-	return nil
+	return err
+}
+
+func (a *App) syncLifecycleLocked(consentGranted bool) error {
+	if !consentGranted {
+		return a.lifecycle.Transition(LifecycleConsentRequired)
+	}
+	if a.paused {
+		return a.lifecycle.Transition(LifecyclePaused)
+	}
+	if a.lastHealth.State == "offline" || a.lastHealth.State == "internet_degraded" {
+		return a.lifecycle.Transition(LifecycleDegraded)
+	}
+	return a.lifecycle.Transition(LifecycleMonitoring)
 }
 
 // TogglePause is used by native tray implementations, which expose a single
@@ -585,6 +592,16 @@ func (a *App) processHealthSample(ctx context.Context, sample health.Sample) err
 	}
 	a.mu.Lock()
 	a.lastHealth = sample
+	if a.lifecycle.State == LifecycleMonitoring || a.lifecycle.State == LifecycleDegraded {
+		next := LifecycleMonitoring
+		if sample.State == "offline" || sample.State == "internet_degraded" {
+			next = LifecycleDegraded
+		}
+		if err := a.lifecycle.Transition(next); err != nil {
+			a.mu.Unlock()
+			return err
+		}
+	}
 	a.mu.Unlock()
 	if err := a.store.SaveHealth(ctx, sample); err != nil {
 		return err
