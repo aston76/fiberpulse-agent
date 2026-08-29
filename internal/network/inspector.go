@@ -36,9 +36,6 @@ func (SystemInspector) Snapshot() (measurement.NetworkContext, error) {
 			continue
 		}
 		active[iface.Name] = iface
-		if isTunnelInterface(iface.Name) {
-			result.VPNDetected = true
-		}
 	}
 	if len(active) == 0 {
 		return result, nil

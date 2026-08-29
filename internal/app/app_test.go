@@ -21,6 +21,10 @@ import (
 	"fiberpulse.dev/agent/internal/storage"
 )
 
+type inspectorFunc func() (measurement.NetworkContext, error)
+
+func (f inspectorFunc) Snapshot() (measurement.NetworkContext, error) { return f() }
+
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 	a, err := New(Config{
@@ -31,6 +35,11 @@ func newTestApp(t *testing.T) *App {
 	if err != nil {
 		t.Fatal(err)
 	}
+	a.inspector = inspectorFunc(func() (measurement.NetworkContext, error) {
+		a.mu.RLock()
+		defer a.mu.RUnlock()
+		return a.lastHealth.Network, nil
+	})
 	t.Cleanup(func() {
 		if err := a.Close(); err != nil {
 			t.Errorf("close app: %v", err)
@@ -228,7 +237,7 @@ func TestPlanSelectionDrivesSnapshotVerdict(t *testing.T) {
 	}
 
 	// The fake provider measures 100 Mbps down: exactly the DITO 100 plan.
-	if err := a.Action(ctx, "plan", []byte(`{"offer_id":"dito-home-100"}`)); err != nil {
+	if err := a.Action(ctx, "plan", []byte(`{"offer_id":"dito-wowfi-pro"}`)); err != nil {
 		t.Fatal(err)
 	}
 	state := snapshot().Plan
@@ -240,7 +249,7 @@ func TestPlanSelectionDrivesSnapshotVerdict(t *testing.T) {
 	}
 
 	// The same measurement against a 400 Mbps plan is complaint-worthy.
-	if err := a.Action(ctx, "plan", []byte(`{"offer_id":"pldt-fibr-400"}`)); err != nil {
+	if err := a.Action(ctx, "plan", []byte(`{"offer_id":"pldt-unli-1699"}`)); err != nil {
 		t.Fatal(err)
 	}
 	state = snapshot().Plan
@@ -253,6 +262,39 @@ func TestPlanSelectionDrivesSnapshotVerdict(t *testing.T) {
 	}
 	if got := snapshot().Plan; got != nil {
 		t.Fatalf("cleared plan still present: %+v", got)
+	}
+}
+
+func TestCustomPlanSelectionAndVPNPreflight(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	if err := a.store.SetConsent(ctx, storage.Consent{Scope: "mlab", Granted: true, PolicyVersion: consentPolicyVersion}); err != nil {
+		t.Fatal(err)
+	}
+	a.lastHealth.Network = measurement.NetworkContext{Online: true, ConnectionType: measurement.ConnectionEthernet, VPNDetected: true}
+	if err := a.StartTest(ctx, scheduler.Manual); !errors.Is(err, measurement.ErrVPNDetected) {
+		t.Fatalf("VPN test was not blocked: %v", err)
+	}
+	if a.testMachine.State != measurement.TestIdle {
+		t.Fatalf("blocked VPN test left state %q", a.testMachine.State)
+	}
+	results, err := a.store.ListResults(ctx, 10)
+	if err != nil || len(results) != 0 {
+		t.Fatalf("blocked VPN test stored results=%d err=%v", len(results), err)
+	}
+
+	a.lastHealth.Network = measurement.NetworkContext{Online: true, ConnectionType: measurement.ConnectionEthernet}
+	a.runTest(scheduler.Manual, a.lastHealth.Network)
+	if err := a.Action(ctx, "plan", []byte(`{"custom":{"isp":"Regional ISP","name":"Home 500","download_mbps":500,"upload_mbps":100}}`)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := a.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := raw.(Snapshot).Plan
+	if state == nil || !state.Offer.Custom || state.Offer.ID != "custom" || state.Verdict == nil || state.Verdict.DownloadPct != 20 {
+		t.Fatalf("unexpected custom plan state: %+v", state)
 	}
 }
 

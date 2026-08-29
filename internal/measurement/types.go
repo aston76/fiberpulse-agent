@@ -18,6 +18,7 @@ var (
 	ErrConsentRequired   = errors.New("M-Lab consent is required")
 	ErrProviderDisabled  = errors.New("measurement provider is disabled")
 	ErrNetworkIneligible = errors.New("network is not eligible for a performance test")
+	ErrVPNDetected       = errors.New("VPN detected: disconnect it before running a speed test")
 )
 
 type Status string

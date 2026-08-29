@@ -38,12 +38,18 @@ type PlanState struct {
 	Verdict *plan.Verdict `json:"verdict,omitempty"`
 }
 
+type persistedPlanSelection struct {
+	OfferID string      `json:"offer_id,omitempty"`
+	Custom  *plan.Offer `json:"custom,omitempty"`
+}
+
 var ErrMeasurementBusy = errors.New("a measurement is already running")
 
 type Config struct {
 	Version                 string
 	DatabasePath            string
 	Provider                measurement.Provider
+	NetworkInspector        network.Inspector
 	ProbeURL                string
 	DNSName                 string
 	SharingTransportEnabled bool
@@ -77,6 +83,7 @@ type App struct {
 	current      incidents.Record
 	testMu       sync.Mutex
 	testKind     scheduler.Kind
+	testProgress measurement.Progress
 	wg           sync.WaitGroup
 	closing      bool
 	closeOnce    sync.Once
@@ -84,27 +91,28 @@ type App struct {
 }
 
 type Snapshot struct {
-	Version           string               `json:"version"`
-	State             string               `json:"state"`
-	TestState         string               `json:"test_state"`
-	SchedulerState    string               `json:"scheduler_state"`
-	ConnectivityState string               `json:"connectivity_state"`
-	Paused            bool                 `json:"paused"`
-	NextAutomaticTest time.Time            `json:"next_automatic_test,omitempty"`
-	Provider          measurement.Metadata `json:"provider"`
-	MLabConsent       storage.Consent      `json:"mlab_consent"`
-	SharingConsent    storage.Consent      `json:"sharing_consent"`
-	SharingState      string               `json:"sharing_state"`
-	LastHealth        health.Sample        `json:"last_health"`
-	Measurements      []measurement.Result `json:"measurements"`
-	ShareQueueCount   int                  `json:"share_queue_count"`
-	SharingAvailable  bool                 `json:"sharing_available"`
-	Baseline          baseline.Result      `json:"baseline"`
-	Plan              *PlanState           `json:"plan,omitempty"`
-	PlanCatalog       []plan.Offer         `json:"plan_catalog"`
-	Incidents         []incidents.Record   `json:"incidents"`
-	Reports           []reporting.Record   `json:"reports"`
-	LastError         string               `json:"last_error,omitempty"`
+	Version           string                `json:"version"`
+	State             string                `json:"state"`
+	TestState         string                `json:"test_state"`
+	TestProgress      *measurement.Progress `json:"test_progress,omitempty"`
+	SchedulerState    string                `json:"scheduler_state"`
+	ConnectivityState string                `json:"connectivity_state"`
+	Paused            bool                  `json:"paused"`
+	NextAutomaticTest time.Time             `json:"next_automatic_test,omitempty"`
+	Provider          measurement.Metadata  `json:"provider"`
+	MLabConsent       storage.Consent       `json:"mlab_consent"`
+	SharingConsent    storage.Consent       `json:"sharing_consent"`
+	SharingState      string                `json:"sharing_state"`
+	LastHealth        health.Sample         `json:"last_health"`
+	Measurements      []measurement.Result  `json:"measurements"`
+	ShareQueueCount   int                   `json:"share_queue_count"`
+	SharingAvailable  bool                  `json:"sharing_available"`
+	Baseline          baseline.Result       `json:"baseline"`
+	Plan              *PlanState            `json:"plan,omitempty"`
+	PlanCatalog       []plan.Offer          `json:"plan_catalog"`
+	Incidents         []incidents.Record    `json:"incidents"`
+	Reports           []reporting.Record    `json:"reports"`
+	LastError         string                `json:"last_error,omitempty"`
 }
 
 type persistedIncidentRuntime struct {
@@ -124,7 +132,10 @@ func New(config Config) (*App, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	inspector := network.SystemInspector{}
+	inspector := config.NetworkInspector
+	if inspector == nil {
+		inspector = network.SystemInspector{}
+	}
 	a := &App{config: config, store: store, inspector: inspector, ctx: ctx, cancel: cancel, lifecycle: LifecycleMachine{State: LifecycleStarting}, testMachine: measurement.TestMachine{State: measurement.TestIdle}, schedule: scheduler.Machine{State: scheduler.Recovered}}
 	a.health = health.Checker{Inspector: inspector, DNSName: config.DNSName, ProbeURL: config.ProbeURL}
 	a.scheduler = scheduler.Scheduler{Store: store}
@@ -289,25 +300,38 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 	a.connectMu.Unlock()
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return Snapshot{Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), ConnectivityState: string(connectivityState), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Plan: planState, PlanCatalog: plan.Catalog(), Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
+	var progress *measurement.Progress
+	if a.testMachine.State != measurement.TestIdle {
+		copy := a.testProgress
+		progress = &copy
+	}
+	return Snapshot{TestProgress: progress, Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), ConnectivityState: string(connectivityState), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Plan: planState, PlanCatalog: plan.Catalog(), Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
 }
 
 // currentPlan resolves the persisted plan selection and, when a complete
 // measurement exists, assesses the latest one against the advertised offer.
 func (a *App) currentPlan(ctx context.Context, results []measurement.Result) *PlanState {
-	var offerID string
-	found, err := a.store.GetSetting(ctx, planSelectionSetting, &offerID)
-	if err != nil || !found || offerID == "" {
+	selection, found, err := a.loadPlanSelection(ctx)
+	if err != nil || !found {
 		return nil
 	}
-	offer, ok := plan.Find(offerID)
-	if !ok {
-		return nil
+	var offer plan.Offer
+	if selection.Custom != nil {
+		offer, err = plan.ValidateCustom(*selection.Custom)
+		if err != nil {
+			return nil
+		}
+	} else {
+		var ok bool
+		offer, ok = plan.Find(selection.OfferID)
+		if !ok {
+			return nil
+		}
 	}
 	state := &PlanState{Offer: offer}
 	for _, result := range results {
 		if result.Status == measurement.StatusComplete && result.DownloadBPS > 0 {
-			verdict := plan.Assess(offer, result.DownloadBPS, result.UploadBPS)
+			verdict := plan.AssessAt(offer, result.DownloadBPS, result.UploadBPS, result.StartedAt)
 			state.Verdict = &verdict
 			break
 		}
@@ -378,10 +402,14 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 		return nil
 	case "plan":
 		var body struct {
-			OfferID string `json:"offer_id"`
+			OfferID string      `json:"offer_id"`
+			Custom  *plan.Offer `json:"custom"`
 		}
 		if err := json.Unmarshal(raw, &body); err != nil {
 			return err
+		}
+		if body.Custom != nil {
+			return a.setCustomPlanSelection(ctx, *body.Custom)
 		}
 		return a.setPlanSelection(ctx, body.OfferID)
 	case "incident-dismiss":
@@ -410,12 +438,42 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 // source of truth for plan metadata.
 func (a *App) setPlanSelection(ctx context.Context, offerID string) error {
 	if offerID == "" {
-		return a.store.SetSetting(ctx, planSelectionSetting, "")
+		return a.store.SetSetting(ctx, planSelectionSetting, persistedPlanSelection{})
 	}
 	if _, ok := plan.Find(offerID); !ok {
 		return plan.ErrUnknownOffer
 	}
-	return a.store.SetSetting(ctx, planSelectionSetting, offerID)
+	return a.store.SetSetting(ctx, planSelectionSetting, persistedPlanSelection{OfferID: offerID})
+}
+
+func (a *App) setCustomPlanSelection(ctx context.Context, custom plan.Offer) error {
+	validated, err := plan.ValidateCustom(custom)
+	if err != nil {
+		return err
+	}
+	return a.store.SetSetting(ctx, planSelectionSetting, persistedPlanSelection{Custom: &validated})
+}
+
+// loadPlanSelection accepts both the current structured setting and the string
+// value used by older FiberPulse builds, so upgrades do not lose a user's plan.
+func (a *App) loadPlanSelection(ctx context.Context) (persistedPlanSelection, bool, error) {
+	var selection persistedPlanSelection
+	found, err := a.store.GetSetting(ctx, planSelectionSetting, &selection)
+	if err == nil {
+		if !found || (selection.OfferID == "" && selection.Custom == nil) {
+			return persistedPlanSelection{}, false, nil
+		}
+		return selection, true, nil
+	}
+	var legacyID string
+	found, legacyErr := a.store.GetSetting(ctx, planSelectionSetting, &legacyID)
+	if legacyErr != nil {
+		return persistedPlanSelection{}, false, errors.Join(err, legacyErr)
+	}
+	if !found || legacyID == "" {
+		return persistedPlanSelection{}, false, nil
+	}
+	return persistedPlanSelection{OfferID: legacyID}, true, nil
 }
 
 // SetPaused persists the scheduler decision before publishing it to the rest of
@@ -583,7 +641,12 @@ func (a *App) Export(ctx context.Context, format string) ([]byte, string, error)
 		body, err = reporting.CSV(results)
 		contentType = "text/csv; charset=utf-8"
 	case "pdf":
-		body, err = reporting.PDF(results, report.PeriodStart, report.PeriodEnd)
+		var selectedOffer *plan.Offer
+		if selected := a.currentPlan(ctx, results); selected != nil {
+			offer := selected.Offer
+			selectedOffer = &offer
+		}
+		body, err = reporting.PDFWithPlan(results, report.PeriodStart, report.PeriodEnd, selectedOffer)
 		contentType = "application/pdf"
 	}
 	if err != nil {
@@ -633,6 +696,9 @@ func (a *App) deleteReport(ctx context.Context, id string) error {
 func (a *App) transitionTest(next measurement.TestState) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if next == measurement.TestIdle {
+		a.testProgress = measurement.Progress{}
+	}
 	return a.testMachine.Transition(next)
 }
 
@@ -650,9 +716,13 @@ func (a *App) rejectTestStart(cause error) error {
 	return cause
 }
 
-func (a *App) advanceTestProgress(phase string) error {
+// advanceTestProgress stores the latest provider progress so the dashboard
+// can render a live animation, then moves the lifecycle machine forward.
+func (a *App) advanceTestProgress(p measurement.Progress) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.testProgress = p
+	phase := p.Phase
 	switch measurement.TestState(phase) {
 	case measurement.TestDownload:
 		if a.testMachine.State == measurement.TestDownload {
@@ -674,10 +744,19 @@ func (a *App) StartTest(ctx context.Context, kind scheduler.Kind) error {
 	defer a.testMu.Unlock()
 	a.mu.RLock()
 	busy := a.testMachine.State != measurement.TestIdle || a.closing
-	networkContext := a.lastHealth.Network
 	a.mu.RUnlock()
 	if busy {
 		return ErrMeasurementBusy
+	}
+	networkContext, err := a.inspector.Snapshot()
+	if err != nil {
+		return fmt.Errorf("unable to verify the active network before testing: %w", err)
+	}
+	a.mu.Lock()
+	a.lastHealth.Network = networkContext
+	a.mu.Unlock()
+	if networkContext.VPNDetected {
+		return measurement.ErrVPNDetected
 	}
 	if err := a.transitionTest(measurement.TestPreflight); err != nil {
 		return err
@@ -741,7 +820,7 @@ func (a *App) runTest(kind scheduler.Kind, before measurement.NetworkContext) {
 	a.lastError = ""
 	a.mu.Unlock()
 	result, runErr := a.config.Provider.Run(a.ctx, before, func(p measurement.Progress) {
-		if err := a.advanceTestProgress(p.Phase); err != nil {
+		if err := a.advanceTestProgress(p); err != nil {
 			lifecycleMu.Lock()
 			lifecycleErr = errors.Join(lifecycleErr, err)
 			lifecycleMu.Unlock()

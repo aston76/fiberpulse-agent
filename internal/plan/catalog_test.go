@@ -1,14 +1,19 @@
 package plan
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestCatalogOffersAreUniqueAndSane(t *testing.T) {
 	seen := map[string]bool{}
+	providers := map[string]bool{}
 	for _, offer := range Catalog() {
 		if seen[offer.ID] {
 			t.Fatalf("duplicate offer id %q", offer.ID)
 		}
 		seen[offer.ID] = true
+		providers[offer.ISP] = true
 		if offer.ISP == "" || offer.Name == "" {
 			t.Fatalf("offer %q lacks isp or name", offer.ID)
 		}
@@ -18,6 +23,12 @@ func TestCatalogOffersAreUniqueAndSane(t *testing.T) {
 		if offer.UploadMbps < 0 {
 			t.Fatalf("offer %q has negative upload", offer.ID)
 		}
+		if offer.VerifiedAt != CatalogVerifiedAt || offer.SourceURL == "" {
+			t.Fatalf("offer %q lacks verification metadata", offer.ID)
+		}
+	}
+	if len(providers) < 10 {
+		t.Fatalf("catalog unexpectedly narrow: %d providers", len(providers))
 	}
 }
 
@@ -63,9 +74,41 @@ func TestAssessComplaintFlagAndUpload(t *testing.T) {
 	if verdict.UploadPct != 95 {
 		t.Fatalf("upload pct: got %d", verdict.UploadPct)
 	}
-	noUpload, _ := Find("pldt-fibr-400")
+	noUpload, _ := Find("pldt-unli-1699")
 	if Assess(noUpload, 400_000_000, 500_000_000).UploadPct != 0 {
 		t.Fatal("upload pct must stay zero when the plan does not advertise upload")
+	}
+}
+
+func TestValidateCustom(t *testing.T) {
+	got, err := ValidateCustom(Offer{ISP: "  Regional ISP ", Name: " Plan 500 ", DownloadMbps: 500, UploadMbps: 100, PricePHP: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "custom" || !got.Custom || got.ISP != "Regional ISP" || got.Name != "Plan 500" || got.PricePHP != 0 {
+		t.Fatalf("unexpected custom offer: %+v", got)
+	}
+	if _, err := ValidateCustom(Offer{ISP: "ISP", Name: "Plan", DownloadMbps: 0}); err == nil {
+		t.Fatal("zero-speed custom plan accepted")
+	}
+}
+
+func TestTimeOfDayOfferUsesPhilippinePeriod(t *testing.T) {
+	offer, ok := Find("converge-time-of-day-day-1699")
+	if !ok {
+		t.Fatal("time-of-day offer missing")
+	}
+	day := time.Date(2026, 8, 30, 2, 0, 0, 0, time.UTC)    // 10:00 PHT
+	night := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC) // 20:00 PHT
+	if got := EffectiveDownloadMbps(offer, day); got != 600 {
+		t.Fatalf("day speed=%d", got)
+	}
+	if got := EffectiveDownloadMbps(offer, night); got != 400 {
+		t.Fatalf("night speed=%d", got)
+	}
+	verdict := AssessAt(offer, 400_000_000, 0, night)
+	if verdict.DownloadPct != 100 || verdict.AdvertisedDownloadMbps != 400 {
+		t.Fatalf("night verdict=%+v", verdict)
 	}
 }
 

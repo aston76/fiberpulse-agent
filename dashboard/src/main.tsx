@@ -11,10 +11,12 @@ type Health = { state?: string; category?: string; dns_configured?: boolean; dns
 type Measurement = { id: string; started_at: string; download_bps: number; upload_bps: number; min_rtt_us: number; status: string; confidence_score: number; confidence_level: string; public_eligible: boolean };
 type Baseline = { maturity: string; count: number; days: number; download_median_bps: number; upload_median_bps: number; min_rtt_median_us: number };
 type Incident = { id: string; category: string; state: string; suspected_at: string; resolved_at?: string };
-type PlanOffer = { id: string; isp: string; name: string; download_mbps: number; upload_mbps: number; note?: string };
-type PlanVerdict = { level: "on_par" | "below_plan" | "well_below_plan"; download_pct: number; upload_pct?: number; summary: string; advice: string; complaint_worthy: boolean };
+type PlanOffer = { id: string; isp: string; name: string; download_mbps: number; upload_mbps: number; price_php?: number; price_period?: string; category?: string; note?: string; source_url?: string; verified_at?: string; custom?: boolean };
+type PlanVerdict = { level: "on_par" | "below_plan" | "well_below_plan"; download_pct: number; upload_pct?: number; advertised_download_mbps: number; summary: string; advice: string; complaint_worthy: boolean };
 type PlanState = { offer: PlanOffer; verdict?: PlanVerdict };
-type Status = { version: string; test_state: string; scheduler_state: string; connectivity_state: string; paused: boolean; next_automatic_test?: string; provider: { name: string; enabled: boolean }; mlab_consent: Consent; sharing_consent: Consent; sharing_state: string; sharing_available: boolean; last_health?: Health; measurements?: Measurement[]; share_queue_count: number; baseline?: Baseline; plan?: PlanState | null; plan_catalog?: PlanOffer[]; incidents?: Incident[]; last_error?: string };
+type PlanSelection = { offer_id: string; custom?: Pick<PlanOffer, "isp" | "name" | "download_mbps" | "upload_mbps"> };
+type TestProgress = { phase: string; bytes: number; elapsed_us: number; estimated_bps: number };
+type Status = { version: string; test_state: string; scheduler_state: string; connectivity_state: string; paused: boolean; next_automatic_test?: string; provider: { name: string; enabled: boolean }; mlab_consent: Consent; sharing_consent: Consent; sharing_state: string; sharing_available: boolean; last_health?: Health; measurements?: Measurement[]; share_queue_count: number; baseline?: Baseline; plan?: PlanState | null; test_progress?: TestProgress; plan_catalog?: PlanOffer[]; incidents?: Incident[]; last_error?: string };
 type Envelope = { csrf_token: string; data: Status };
 
 const mbps = (value = 0) => value > 0 ? (value / 1_000_000).toFixed(value >= 100_000_000 ? 0 : 1) : "—";
@@ -34,6 +36,12 @@ function useStatus() {
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reach FiberPulse"); }
   };
   useEffect(() => { void refresh(); const timer = window.setInterval(refresh, 10_000); return () => window.clearInterval(timer); }, []);
+  const testing = !!envelope && envelope.data.test_state !== "idle";
+  useEffect(() => {
+    if (!testing) return;
+    const timer = window.setInterval(refresh, 1500);
+    return () => window.clearInterval(timer);
+  }, [testing]);
   const action = async (name: string, body: unknown = {}) => {
     if (!envelope) return;
     const response = await fetch(`/api/v1/actions/${name}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": envelope.csrf_token }, body: JSON.stringify(body) });
@@ -99,21 +107,153 @@ function SharingPermission({ busy, error, onSave, onClose }: { busy: boolean; er
   </section></div>;
 }
 
-function PlanModal({ catalog, current, busy, onSave, onClose }: { catalog: PlanOffer[]; current?: string; busy: boolean; onSave: (id: string) => void; onClose: () => void }) {
-  const isps = useMemo(() => [...new Set(catalog.map(offer => offer.isp))], [catalog]);
-  const [isp, setIsp] = useState(() => catalog.find(offer => offer.id === current)?.isp || isps[0] || "");
+function TestPreflightNotice({ mode, busy, onContinue, onClose }: { mode: "vpn" | "wifi"; busy: boolean; onContinue: () => void; onClose: () => void }) {
+  const vpn = mode === "vpn";
+  return <div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="test-preflight-title">
+    <div class={`modal-icon ${vpn ? "warning" : ""}`}>{vpn ? "!" : "⌁"}</div>
+    <p class="eyebrow">Before the speed test</p>
+    <h2 id="test-preflight-title">{vpn ? "Disconnect your VPN first" : "Improve your Wi-Fi measurement"}</h2>
+    <p class="modal-lead">{vpn ? "A VPN changes the route and can limit the speed. The result would measure the VPN path, not the connection delivered by your provider." : "FiberPulse detected that this Mac is using Wi-Fi. You can continue, but the result may include Wi-Fi distance, walls and interference."}</p>
+    <div class="permission-points">
+      {vpn ? <>
+        <p><b>Turn off the VPN application</b><span>Also disconnect any system VPN profile currently active.</span></p>
+        <p><b>Then start the test again</b><span>FiberPulse checks the active route again and refuses the test if the VPN is still detected.</span></p>
+      </> : <>
+        <p><b>Best method: Ethernet cable</b><span>Connect this Mac directly to the router supplied by your Internet provider.</span></p>
+        <p><b>If you stay on Wi-Fi</b><span>Move as close as possible to the provider router before starting the measurement.</span></p>
+        <p><b>Pause other traffic</b><span>Stop large downloads, cloud backups and streaming during the test.</span></p>
+      </>}
+    </div>
+    <div class="modal-actions"><button class="button quiet" disabled={busy} onClick={onClose}>Cancel</button><button class="button primary" disabled={busy} onClick={onContinue}>{busy ? "Checking…" : vpn ? "VPN is off — start test" : "Continue on Wi-Fi"}</button></div>
+  </section></div>;
+}
+
+function TestShow({ state, progress }: { state: string; progress?: TestProgress }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [variant] = useState(() => Math.floor(Math.random() * 4));
+  const [startedAt] = useState(() => Date.now());
+  const [elapsed, setElapsed] = useState(0);
+  const reduced = useMemo(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 500);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+
+  useEffect(() => {
+    if (reduced) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const palette = ["#087cff", "#08c7f5", "#08e889"];
+    const resize = () => { const box = canvas.getBoundingClientRect(); canvas.width = Math.max(1, box.width * dpr); canvas.height = Math.max(1, box.height * dpr); };
+    resize();
+    window.addEventListener("resize", resize);
+    const seeds = Array.from({ length: 64 }, (_, i) => ({ a: Math.random() * Math.PI * 2, s: 0.5 + Math.random(), r: 0.35 + 0.6 * ((i % 3) / 2) }));
+    let raf = 0;
+    const frame = (now: number) => {
+      const t = now / 1000;
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.lineCap = "round";
+      if (variant === 0) {
+        for (let layer = 0; layer < 3; layer++) {
+          ctx.beginPath();
+          for (let x = 0; x <= w; x += 8 * dpr) {
+            const y = h / 2 + Math.sin(x / (90 * dpr) + t * (1.1 + layer * 0.35) + layer * 1.7) * h * (0.13 + layer * 0.07) + Math.sin(x / (31 * dpr) - t * 2.1) * h * 0.05;
+            x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+          }
+          ctx.strokeStyle = palette[layer] + (layer === 0 ? "" : "99");
+          ctx.lineWidth = (2.6 - layer * 0.6) * dpr;
+          ctx.stroke();
+        }
+      } else if (variant === 1) {
+        const cx = w / 2, cy = h / 2;
+        palette.forEach((color, i) => { ctx.beginPath(); ctx.arc(cx, cy, h * (0.18 + i * 0.16), 0, Math.PI * 2); ctx.strokeStyle = color + "33"; ctx.lineWidth = 1.2 * dpr; ctx.stroke(); });
+        seeds.slice(0, 27).forEach((p, i) => {
+          const angle = p.a + t * p.s * (i % 2 === 0 ? 1 : -1);
+          const radius = h * p.r * 0.75;
+          ctx.beginPath(); ctx.arc(cx + Math.cos(angle) * radius * 1.35, cy + Math.sin(angle) * radius, (1.6 + (i % 3)) * dpr, 0, Math.PI * 2);
+          ctx.fillStyle = palette[i % 3]; ctx.fill();
+        });
+      } else if (variant === 2) {
+        const count = 42, slot = w / count;
+        seeds.slice(0, count).forEach((p, i) => {
+          const level = 0.18 + 0.82 * Math.abs(Math.sin(t * (1.2 + p.s) + p.a));
+          const bh = h * 0.62 * level, x = i * slot + slot * 0.22;
+          const gradient = ctx.createLinearGradient(0, h - bh, 0, h);
+          gradient.addColorStop(0, palette[i % 3]); gradient.addColorStop(1, palette[i % 3] + "22");
+          ctx.fillStyle = gradient;
+          ctx.beginPath(); ctx.roundRect(x, h / 2 + h * 0.31 - bh, slot * 0.56, bh, 3 * dpr); ctx.fill();
+        });
+      } else {
+        const cx = w / 2, cy = h / 2, maxR = h * 0.46;
+        for (let i = 0; i < 4; i++) {
+          const radius = ((t * 0.24 + i / 4) % 1) * maxR;
+          ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.strokeStyle = palette[1] + Math.round(200 * (1 - radius / maxR)).toString(16).padStart(2, "0");
+          ctx.lineWidth = 2 * dpr; ctx.stroke();
+        }
+        const sweep = t * 1.4;
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, maxR, sweep, sweep + 0.6); ctx.closePath();
+        ctx.fillStyle = "#08c7f522"; ctx.fill();
+      }
+      raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", resize); };
+  }, [reduced, variant]);
+
+  const phase = progress?.phase || state;
+  const label = phase === "download" ? "Measuring download" : phase === "upload" ? "Measuring upload" : phase === "validate" || phase === "persist" || phase === "share_queued" ? "Finishing up" : "Contacting the nearest server";
+  const liveMbps = progress && progress.estimated_bps > 0 ? (progress.estimated_bps / 1_000_000).toFixed(1) : null;
+  return <div class="test-show" role="status" aria-live="polite">
+    <canvas ref={canvasRef} aria-hidden="true" />
+    <div class="test-show-overlay">
+      <strong>{liveMbps ? liveMbps + " Mbps" : "…"}</strong>
+      <span>{label} · {elapsed}s</span>
+    </div>
+  </div>;
+}
+
+function PlanModal({ catalog, current, busy, onSave, onClose }: { catalog: PlanOffer[]; current?: PlanOffer; busy: boolean; onSave: (selection: PlanSelection) => void; onClose: () => void }) {
+  const customChoice = "__custom__";
+  const isps = useMemo(() => [...new Set(catalog.map(offer => offer.isp))].sort((a, b) => a.localeCompare(b)), [catalog]);
+  const [isp, setIsp] = useState(() => current?.custom ? customChoice : current?.isp || isps[0] || customChoice);
   const offers = catalog.filter(offer => offer.isp === isp);
-  const [offerId, setOfferId] = useState(() => current && offers.some(offer => offer.id === current) ? current : offers[0]?.id || "");
+  const [offerId, setOfferId] = useState(() => current && offers.some(offer => offer.id === current.id) ? current.id : offers[0]?.id || "");
+  const [customProvider, setCustomProvider] = useState(() => current?.custom ? current.isp : "");
+  const [customName, setCustomName] = useState(() => current?.custom ? current.name : "");
+  const [customDown, setCustomDown] = useState(() => current?.custom ? String(current.download_mbps) : "");
+  const [customUp, setCustomUp] = useState(() => current?.custom && current.upload_mbps ? String(current.upload_mbps) : "");
   const selected = catalog.find(offer => offer.id === offerId);
   const pickIsp = (value: string) => { setIsp(value); setOfferId(catalog.find(offer => offer.isp === value)?.id || ""); };
+  const customValid = Boolean(customProvider.trim() && customName.trim() && Number(customDown) >= 1 && Number(customDown) <= 10000 && (!customUp || (Number(customUp) >= 0 && Number(customUp) <= 10000)));
+  const submit = () => {
+    if (isp === customChoice) {
+      onSave({ offer_id: "", custom: { isp: customProvider.trim(), name: customName.trim(), download_mbps: Number(customDown), upload_mbps: Number(customUp) || 0 } });
+      return;
+    }
+    onSave({ offer_id: offerId });
+  };
+  const price = selected?.price_php ? `₱${selected.price_php.toLocaleString()} / ${selected.price_period || "month"}` : "";
   return <div class="modal-backdrop"><section class="modal settings" role="dialog" aria-modal="true" aria-labelledby="plan-title">
     <button class="modal-close" aria-label="Close plan selection" onClick={onClose}>×</button>
     <p class="eyebrow">Your Internet plan</p><h2 id="plan-title">What do you pay for?</h2>
     <p class="modal-text">FiberPulse compares your measurements with the advertised speed of your offer. Consumer plans advertise "up to" speeds, so the verdict stays conservative.</p>
-    <label class="plan-field"><span>Provider</span><select value={isp} onChange={event => pickIsp((event.target as HTMLSelectElement).value)}>{isps.map(name => <option value={name}>{name}</option>)}</select></label>
-    <label class="plan-field"><span>Offer</span><select value={offerId} onChange={event => setOfferId((event.target as HTMLSelectElement).value)}>{offers.map(offer => <option value={offer.id}>{offer.name + " — up to " + offer.download_mbps + " Mbps"}</option>)}</select></label>
-    {selected?.note && <p class="plan-note">{selected.note}</p>}
-    <div class="modal-actions">{current && <button class="button quiet" disabled={busy} onClick={() => onSave("")}>Remove</button>}<button class="button quiet" disabled={busy} onClick={onClose}>Cancel</button><button class="button primary" disabled={busy || !offerId} onClick={() => onSave(offerId)}>Save plan</button></div>
+    <label class="plan-field"><span>Provider</span><select value={isp} onChange={event => pickIsp((event.target as HTMLSelectElement).value)}>{isps.map(name => <option value={name}>{name}</option>)}<option value={customChoice}>My provider / plan is not listed</option></select></label>
+    {isp === customChoice ? <div class="custom-plan-grid">
+      <label class="plan-field"><span>Provider name</span><input maxlength={80} value={customProvider} onInput={event => setCustomProvider(event.currentTarget.value)} placeholder="e.g. a regional ISP" /></label>
+      <label class="plan-field"><span>Offer name</span><input maxlength={120} value={customName} onInput={event => setCustomName(event.currentTarget.value)} placeholder="As written on your bill" /></label>
+      <label class="plan-field"><span>Advertised download (Mbps)</span><input type="number" min="1" max="10000" value={customDown} onInput={event => setCustomDown(event.currentTarget.value)} placeholder="500" /></label>
+      <label class="plan-field"><span>Advertised upload (optional)</span><input type="number" min="0" max="10000" value={customUp} onInput={event => setCustomUp(event.currentTarget.value)} placeholder="Leave blank if unknown" /></label>
+      <p class="plan-note">Use the speed written on your latest bill or contract. FiberPulse marks this as subscriber-entered in the report.</p>
+    </div> : <>
+      <label class="plan-field"><span>Offer</span><select value={offerId} onChange={event => setOfferId((event.target as HTMLSelectElement).value)}>{[...new Set(offers.map(offer => offer.category || "Other"))].map(category => <optgroup label={category}>{offers.filter(offer => (offer.category || "Other") === category).map(offer => <option value={offer.id}>{offer.name + " — up to " + offer.download_mbps + " Mbps"}</option>)}</optgroup>)}</select></label>
+      {selected && <p class="plan-note"><b>{[selected.category, price].filter(Boolean).join(" · ")}</b>{selected.note && <span>{selected.note}</span>}{selected.verified_at && <span>Official catalog checked {selected.verified_at}.</span>}{selected.source_url && <a href={selected.source_url} target="_blank" rel="noreferrer">Open provider source ↗</a>}</p>}
+    </>}
+    <div class="modal-actions">{current && <button class="button quiet" disabled={busy} onClick={() => onSave({ offer_id: "" })}>Remove</button>}<button class="button quiet" disabled={busy} onClick={onClose}>Cancel</button><button class="button primary" disabled={busy || (isp === customChoice ? !customValid : !offerId)} onClick={submit}>Save plan</button></div>
   </section></div>;
 }
 
@@ -125,6 +265,7 @@ function App() {
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [sharingOpen, setSharingOpen] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
+  const [testPreflight, setTestPreflight] = useState<"vpn" | "wifi" | null>(null);
   const [exporting, setExporting] = useState("");
 
   if (!envelope) return <main class="loading"><img src={brandMark} alt="" /><span>{error || "Opening FiberPulse…"}</span></main>;
@@ -148,7 +289,7 @@ function App() {
   const verdict = planState?.verdict;
   const planTone = !verdict ? "cyan" : verdict.level === "on_par" ? "green" : verdict.level === "below_plan" ? "amber" : "red";
   const planTitle = planState ? planState.offer.name : "Not selected";
-  const planDetail = !planState ? "Compare your results with the offer you pay for." : !verdict ? planState.offer.isp + " · advertised up to " + planState.offer.download_mbps + " Mbps — run a test to compare." : verdict.summary + " · " + verdict.download_pct + "% of advertised " + planState.offer.download_mbps + " Mbps";
+  const planDetail = !planState ? "Compare your results with the offer you pay for." : !verdict ? planState.offer.isp + " · advertised up to " + planState.offer.download_mbps + " Mbps — run a test to compare." : verdict.summary + " · " + verdict.download_pct + "% of advertised " + verdict.advertised_download_mbps + " Mbps";
 
   const run = async (name: string, body: unknown = {}) => {
     setActionError(""); setBusy(true);
@@ -170,11 +311,14 @@ function App() {
   };
   const startTest = () => {
     if (!status.mlab_consent.granted) { setPermissionOpen(true); return; }
+    if (network.vpn_suspected) { setTestPreflight("vpn"); return; }
+    if (network.connection_type === "wifi") { setTestPreflight("wifi"); return; }
     void run("test");
   };
-  const savePlan = async (offerId: string) => {
+  const continueTest = () => { setTestPreflight(null); void run("test"); };
+  const savePlan = async (selection: PlanSelection) => {
     setActionError(""); setBusy(true);
-    try { await action("plan", { offer_id: offerId }); setPlanOpen(false); }
+    try { await action("plan", selection); setPlanOpen(false); }
     catch (cause) { setActionError(cause instanceof Error ? cause.message : "Unable to save your plan"); }
     finally { setBusy(false); }
   };
@@ -204,7 +348,7 @@ function App() {
         <article><span class="speed-icon ping">●</span><div><small>LATENCY</small><strong>{latency(latest?.min_rtt_us)}</strong><em>ms</em></div></article>
       </div>
       <button class="test-button" disabled={busy || !status.provider.enabled || status.test_state !== "idle"} onClick={startTest}><span>▶</span>{status.test_state === "idle" ? "Run speed test" : `Test ${words(status.test_state)}…`}</button>
-      <p class="test-note">Measures download, upload and latency. Results stay on this device.</p>
+      {status.test_state === "idle" ? <p class="test-note">Measures download, upload and latency. Results stay on this device.</p> : <TestShow state={status.test_state} progress={status.test_progress} />}
     </section>
 
     <section class="quick-grid">
@@ -216,7 +360,7 @@ function App() {
     <section class="history-card"><div class="section-heading"><div><p class="eyebrow">Your speed over time</p><h2>Simple performance history</h2></div><span>{measurements.length} test{measurements.length === 1 ? "" : "s"}</span></div><HistoryChart measurements={measurements} /></section>
 
     <details class="details-card"><summary><span><b>Details and reports</b><small>Network context, confidence, incidents and exports</small></span><i>⌄</i></summary><div class="details-content">
-      <div class="detail-grid"><article><h3>Network</h3><dl><div><dt>Connection</dt><dd>{words(network.connection_type)}</dd></div><div><dt>VPN / proxy</dt><dd>{network.vpn_suspected || network.proxy_suspected ? "Suspected" : "Not detected"}</dd></div><div><dt>Metered</dt><dd>{network.metered ? "Yes" : "No"}</dd></div></dl></article><article><h3>Latest result</h3><dl><div><dt>Confidence</dt><dd>{latest ? `${latest.confidence_score}/100 · ${words(latest.confidence_level)}` : "No test"}</dd></div><div><dt>Public eligible</dt><dd>{latest?.public_eligible ? "Yes" : "No"}</dd></div><div><dt>Provider</dt><dd>{status.provider.name === "development_fake" ? "Local simulation" : status.provider.name}</dd></div></dl></article><article><h3>Personal baseline</h3><dl><div><dt>Qualified tests</dt><dd>{baseline.count}</dd></div><div><dt>Median download</dt><dd>{baseline.count ? `${mbps(baseline.download_median_bps)} Mbps` : "Collecting data"}</dd></div><div><dt>Maturity</dt><dd>{words(baseline.maturity)}</dd></div></dl></article>{planState && <article><h3>Plan check</h3><dl><div><dt>Your offer</dt><dd>{planState.offer.isp + " · " + planState.offer.name}</dd></div><div><dt>Advertised</dt><dd>{"up to " + planState.offer.download_mbps + " Mbps down" + (planState.offer.upload_mbps ? " / " + planState.offer.upload_mbps + " Mbps up" : "")}</dd></div><div><dt>Latest vs plan</dt><dd>{verdict ? verdict.download_pct + "% of advertised · " + verdict.summary : "Run a test to compare"}</dd></div>{verdict && <div><dt>What it means</dt><dd>{verdict.advice}</dd></div>}</dl></article>}</div>
+      <div class="detail-grid"><article><h3>Network</h3><dl><div><dt>Connection</dt><dd>{words(network.connection_type)}</dd></div><div><dt>VPN / proxy</dt><dd>{network.vpn_suspected || network.proxy_suspected ? "Suspected" : "Not detected"}</dd></div><div><dt>Metered</dt><dd>{network.metered ? "Yes" : "No"}</dd></div></dl></article><article><h3>Latest result</h3><dl><div><dt>Confidence</dt><dd>{latest ? `${latest.confidence_score}/100 · ${words(latest.confidence_level)}` : "No test"}</dd></div><div><dt>Public eligible</dt><dd>{latest?.public_eligible ? "Yes" : "No"}</dd></div><div><dt>Provider</dt><dd>{status.provider.name === "development_fake" ? "Local simulation" : status.provider.name}</dd></div></dl></article><article><h3>Personal baseline</h3><dl><div><dt>Qualified tests</dt><dd>{baseline.count}</dd></div><div><dt>Median download</dt><dd>{baseline.count ? `${mbps(baseline.download_median_bps)} Mbps` : "Collecting data"}</dd></div><div><dt>Maturity</dt><dd>{words(baseline.maturity)}</dd></div></dl></article>{planState && <article><h3>Plan check</h3><dl><div><dt>Your offer</dt><dd>{planState.offer.isp + " · " + planState.offer.name}</dd></div><div><dt>Advertised</dt><dd>{"up to " + (verdict?.advertised_download_mbps || planState.offer.download_mbps) + " Mbps down" + (planState.offer.upload_mbps ? " / " + planState.offer.upload_mbps + " Mbps up" : "")}</dd></div><div><dt>Latest vs plan</dt><dd>{verdict ? verdict.download_pct + "% of advertised · " + verdict.summary : "Run a test to compare"}</dd></div>{verdict && <div><dt>What it means</dt><dd>{verdict.advice}</dd></div>}</dl></article>}</div>
       <div class="report-actions"><button class="button secondary" disabled={!!exporting} onClick={() => void exportReport("pdf")}>{exporting === "pdf" ? "Creating…" : "Download PDF report"}</button><button class="button secondary" disabled={!!exporting} onClick={() => void exportReport("csv")}>{exporting === "csv" ? "Creating…" : "Download CSV data"}</button></div>
     </div></details>
 
@@ -224,7 +368,8 @@ function App() {
 
     {settingsOpen && <div class="modal-backdrop"><section class="modal settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><button class="modal-close" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button><p class="eyebrow">Settings</p><h2 id="settings-title">Simple controls</h2><div class="setting-row"><div><b>Internet speed tests</b><span>{status.mlab_consent.granted ? "Allowed permanently" : "Disabled"}</span></div>{status.mlab_consent.granted ? <button class="mini-button danger" onClick={() => void saveMeasurementPermission(false)}>Disable</button> : <button class="mini-button" onClick={() => { setSettingsOpen(false); setPermissionOpen(true); }}>Enable</button>}</div><div class="setting-row"><div><b>Automatic monitoring</b><span>{status.paused ? "Paused" : "Running"}</span></div><button class="mini-button" onClick={() => void run("pause", { paused: !status.paused })}>{status.paused ? "Resume" : "Pause"}</button></div><div class="setting-row"><div><b>Anonymous sharing</b><span>{status.sharing_consent.granted ? "Enabled" : status.sharing_available ? "Optional and disabled" : "Unavailable in this build"}</span></div>{status.sharing_consent.granted ? <button class="mini-button danger" onClick={() => void saveSharing(false)}>Disable</button> : <button class="mini-button" disabled={!status.sharing_available} onClick={() => { setSettingsOpen(false); setSharingOpen(true); }}>Enable</button>}</div><div class="setting-row"><div><b>Your Internet plan</b><span>{planState ? planState.offer.isp + " · " + planState.offer.name : "Not selected"}</span></div><button class="mini-button" onClick={() => { setSettingsOpen(false); setPlanOpen(true); }}>{planState ? "Change" : "Choose"}</button></div><p class="settings-note">Your choices are saved on this device. FiberPulse will not ask again automatically.</p></section></div>}
    {showPermission && <MeasurementPermission firstRun={firstRun} busy={busy} error={actionError} onSave={granted => void saveMeasurementPermission(granted)} onClose={() => setPermissionOpen(false)} />}
-    {planOpen && <PlanModal catalog={status.plan_catalog || []} current={planState?.offer.id} busy={busy} onSave={id => void savePlan(id)} onClose={() => setPlanOpen(false)} />}
+    {planOpen && <PlanModal catalog={status.plan_catalog || []} current={planState?.offer} busy={busy} onSave={selection => void savePlan(selection)} onClose={() => setPlanOpen(false)} />}
+    {testPreflight && <TestPreflightNotice mode={testPreflight} busy={busy} onContinue={continueTest} onClose={() => setTestPreflight(null)} />}
     {sharingOpen && <SharingPermission busy={busy} error={actionError} onSave={granted => void saveSharing(granted)} onClose={() => setSharingOpen(false)} />}
   </main>;
 }

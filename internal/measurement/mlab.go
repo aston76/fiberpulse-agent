@@ -45,6 +45,10 @@ func (p *MLabProvider) Preflight(_ context.Context, network NetworkContext, cons
 	if network.Roaming {
 		result.Reasons = append(result.Reasons, "network.roaming")
 	}
+	if network.VPNDetected {
+		result.Reasons = append(result.Reasons, "network.vpn")
+		return result, ErrVPNDetected
+	}
 	if len(result.Reasons) != 0 {
 		return result, ErrNetworkIneligible
 	}
