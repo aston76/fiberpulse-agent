@@ -13,6 +13,7 @@ make test
 make dashboard
 make build
 make windows
+make macos
 ```
 
 Native Windows artifacts are produced with the repository's MinGW cross-build.
@@ -20,6 +21,13 @@ Universal macOS `.app` bundles containing both Apple Silicon and Intel slices
 are built on macOS with `make macos`; GitHub CI verifies both macOS 14 and 15.
 Neither development artifact is approved for
 public distribution until its platform signing gate is complete.
+
+The updater helper validates a signed, expiring manifest, semantic version and
+monotonic sequence, artifact hash and size, and the native platform signature.
+It starts the replacement agent, waits for a PID-bound health receipt, and
+restores and restarts the prior binary if startup fails. See
+[`docs/UPDATE-SECURITY.md`](docs/UPDATE-SECURITY.md) for the manifest contract
+and the remaining release gates.
 
 Real M-Lab execution is disabled in ordinary development builds. It additionally
 requires recorded M-Lab consent and `FIBERPULSE_ENABLE_MLAB_DEV=1`. Automated

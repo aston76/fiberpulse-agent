@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -28,6 +29,7 @@ func main() {
 func run() error {
 	quitExisting := flag.Bool("quit", false, "request graceful shutdown of the running agent")
 	postUpdate := flag.String("post-update", "", "version started after a verified update")
+	updateHealthPath := flag.String("update-health-file", "", "internal post-update health receipt path")
 	flag.Parse()
 	configDir, err := os.UserConfigDir()
 	if err != nil {
@@ -62,11 +64,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer agent.Close()
 	url, err := agent.Start()
 	if err != nil {
 		return err
 	}
-	defer agent.Close()
+	if *updateHealthPath != "" {
+		executable, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve executable for update health receipt: %w", err)
+		}
+		if err := writeUpdateHealth(*updateHealthPath, version, executable); err != nil {
+			return err
+		}
+	}
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(quit)
