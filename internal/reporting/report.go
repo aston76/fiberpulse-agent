@@ -254,11 +254,17 @@ func (r *reportPDF) drawPlanComparison(offer *plan.Offer, complete []measurement
 	r.setTextColor(70, 91, 112)
 	comparison := fmt.Sprintf("Latest download: %.1f Mbps  |  Advertised: up to %d Mbps  |  Result: %d%%", float64(complete[0].DownloadBPS)/1e6, verdict.AdvertisedDownloadMbps, verdict.DownloadPct)
 	r.text(r.margin+17, r.y+53, comparison)
-	metadata := "Subscriber-entered offer; advertised speed should be checked against the latest bill."
+	metadata := offer.CountryName + "  |  Subscriber-entered offer; advertised speed should be checked against the latest bill."
 	if !offer.Custom {
-		metadata = "Official provider catalog checked " + offer.VerifiedAt
-		if offer.PricePHP > 0 {
-			metadata += fmt.Sprintf("  |  PHP %s / %s", formatInteger(offer.PricePHP), offer.PricePeriod)
+		metadata = offer.CountryName + "  |  Official provider catalog checked " + offer.VerifiedAt
+		amount := offer.PriceAmount
+		currency := offer.CurrencyCode
+		if amount == 0 && offer.PricePHP > 0 {
+			amount = offer.PricePHP
+			currency = plan.PhilippinesCurrency
+		}
+		if amount > 0 {
+			metadata += fmt.Sprintf("  |  %s %s / %s", currency, formatInteger(amount), offer.PricePeriod)
 		}
 	}
 	r.setFont("GoRegular", 7.5)

@@ -1,7 +1,8 @@
-// Package plan holds the built-in catalog of Philippine ISP offers and the
+// Package plan holds the country-aware catalog of ISP offers and the
 // conservative comparison between a subscribed offer and a measured NDT7
-// result. Catalog entries come from the providers' public pages (checked
-// 2026-08-30); upload is left at zero when the provider does not advertise it.
+// result. The initial catalog covers the Philippines; every offer carries its
+// own country and verification metadata so other markets can be added without
+// changing the API or persisted selections.
 package plan
 
 import (
@@ -15,11 +16,15 @@ var ErrUnknownOffer = errors.New("unknown plan offer")
 
 type Offer struct {
 	ID           string `json:"id"`
+	CountryCode  string `json:"country_code"`
+	CountryName  string `json:"country_name"`
 	ISP          string `json:"isp"`
 	Name         string `json:"name"`
 	DownloadMbps int    `json:"download_mbps"`
 	UploadMbps   int    `json:"upload_mbps"` // 0 when not advertised
-	PricePHP     int    `json:"price_php,omitempty"`
+	PriceAmount  int    `json:"price_amount,omitempty"`
+	CurrencyCode string `json:"currency_code,omitempty"`
+	PricePHP     int    `json:"price_php,omitempty"` // Legacy API field; use PriceAmount for new countries.
 	PricePeriod  string `json:"price_period,omitempty"`
 	Category     string `json:"category,omitempty"`
 	Note         string `json:"note,omitempty"`
@@ -31,6 +36,12 @@ type Offer struct {
 }
 
 const CatalogVerifiedAt = "2026-08-30"
+
+const (
+	PhilippinesCode     = "PH"
+	PhilippinesName     = "Philippines"
+	PhilippinesCurrency = "PHP"
+)
 
 func Catalog() []Offer {
 	return []Offer{
@@ -144,6 +155,18 @@ func Catalog() []Offer {
 }
 
 func verified(offer Offer) Offer {
+	if offer.CountryCode == "" {
+		offer.CountryCode = PhilippinesCode
+	}
+	if offer.CountryCode == PhilippinesCode && offer.CountryName == "" {
+		offer.CountryName = PhilippinesName
+	}
+	if offer.PriceAmount == 0 && offer.PricePHP > 0 {
+		offer.PriceAmount = offer.PricePHP
+	}
+	if offer.CountryCode == PhilippinesCode && offer.CurrencyCode == "" && offer.PriceAmount > 0 {
+		offer.CurrencyCode = PhilippinesCurrency
+	}
 	offer.VerifiedAt = CatalogVerifiedAt
 	return offer
 }
@@ -152,6 +175,19 @@ func verified(offer Offer) Offer {
 // regional ISPs, grandfathered offers and promotions without pretending that
 // FiberPulse's built-in catalog can be permanently exhaustive.
 func ValidateCustom(offer Offer) (Offer, error) {
+	offer.CountryCode = strings.ToUpper(strings.TrimSpace(offer.CountryCode))
+	offer.CountryName = strings.TrimSpace(offer.CountryName)
+	if offer.CountryCode == "" && offer.CountryName == "" {
+		// Preserve custom selections created by the Philippine-only build.
+		offer.CountryCode = PhilippinesCode
+		offer.CountryName = PhilippinesName
+	}
+	if len(offer.CountryCode) != 2 || offer.CountryCode[0] < 'A' || offer.CountryCode[0] > 'Z' || offer.CountryCode[1] < 'A' || offer.CountryCode[1] > 'Z' {
+		return Offer{}, errors.New("custom country code must contain two ISO letters")
+	}
+	if offer.CountryName == "" || len(offer.CountryName) > 80 {
+		return Offer{}, errors.New("custom country name must contain 1 to 80 characters")
+	}
 	offer.ISP = strings.TrimSpace(offer.ISP)
 	offer.Name = strings.TrimSpace(offer.Name)
 	if offer.ISP == "" || len(offer.ISP) > 80 {
@@ -167,6 +203,8 @@ func ValidateCustom(offer Offer) (Offer, error) {
 		return Offer{}, errors.New("custom upload speed must be between 0 and 10000 Mbps")
 	}
 	offer.ID = "custom"
+	offer.PriceAmount = 0
+	offer.CurrencyCode = ""
 	offer.PricePHP = 0
 	offer.PricePeriod = ""
 	offer.Category = "Custom"

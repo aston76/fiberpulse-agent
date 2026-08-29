@@ -8,12 +8,17 @@ import (
 func TestCatalogOffersAreUniqueAndSane(t *testing.T) {
 	seen := map[string]bool{}
 	providers := map[string]bool{}
+	countries := map[string]bool{}
 	for _, offer := range Catalog() {
 		if seen[offer.ID] {
 			t.Fatalf("duplicate offer id %q", offer.ID)
 		}
 		seen[offer.ID] = true
 		providers[offer.ISP] = true
+		countries[offer.CountryCode] = true
+		if offer.CountryCode != PhilippinesCode || offer.CountryName != PhilippinesName {
+			t.Fatalf("initial offer %q has unexpected country %s/%s", offer.ID, offer.CountryCode, offer.CountryName)
+		}
 		if offer.ISP == "" || offer.Name == "" {
 			t.Fatalf("offer %q lacks isp or name", offer.ID)
 		}
@@ -26,9 +31,18 @@ func TestCatalogOffersAreUniqueAndSane(t *testing.T) {
 		if offer.VerifiedAt != CatalogVerifiedAt || offer.SourceURL == "" {
 			t.Fatalf("offer %q lacks verification metadata", offer.ID)
 		}
+		if offer.PricePHP > 0 && (offer.PriceAmount != offer.PricePHP || offer.CurrencyCode != PhilippinesCurrency) {
+			t.Fatalf("offer %q lacks generic price metadata", offer.ID)
+		}
+		if offer.PriceAmount > 0 && offer.CurrencyCode == "" {
+			t.Fatalf("offer %q has an amount without a currency", offer.ID)
+		}
 	}
 	if len(providers) < 10 {
 		t.Fatalf("catalog unexpectedly narrow: %d providers", len(providers))
+	}
+	if len(countries) != 1 || !countries[PhilippinesCode] {
+		t.Fatalf("initial catalog should expose only the Philippines: %+v", countries)
 	}
 }
 
@@ -85,11 +99,18 @@ func TestValidateCustom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != "custom" || !got.Custom || got.ISP != "Regional ISP" || got.Name != "Plan 500" || got.PricePHP != 0 {
+	if got.ID != "custom" || !got.Custom || got.CountryCode != PhilippinesCode || got.CountryName != PhilippinesName || got.ISP != "Regional ISP" || got.Name != "Plan 500" || got.PricePHP != 0 {
 		t.Fatalf("unexpected custom offer: %+v", got)
+	}
+	international, err := ValidateCustom(Offer{CountryCode: " fr ", CountryName: "France", ISP: "Example", Name: "Fiber", DownloadMbps: 1000})
+	if err != nil || international.CountryCode != "FR" || international.CountryName != "France" {
+		t.Fatalf("international custom offer: %+v err=%v", international, err)
 	}
 	if _, err := ValidateCustom(Offer{ISP: "ISP", Name: "Plan", DownloadMbps: 0}); err == nil {
 		t.Fatal("zero-speed custom plan accepted")
+	}
+	if _, err := ValidateCustom(Offer{CountryCode: "FRA", CountryName: "France", ISP: "ISP", Name: "Plan", DownloadMbps: 100}); err == nil {
+		t.Fatal("invalid country code accepted")
 	}
 }
 
