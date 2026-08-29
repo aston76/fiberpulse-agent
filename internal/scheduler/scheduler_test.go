@@ -62,11 +62,13 @@ func TestManualCooldown(t *testing.T) {
 	if err := s.Reserve(context.Background(), Manual); err != nil {
 		t.Fatal(err)
 	}
-	s.Now = func() time.Time { return now.Add(29 * time.Minute) }
-	if !errors.Is(s.Reserve(context.Background(), Manual), ErrManualCooldown) {
+	s.Now = func() time.Time { return now.Add(4 * time.Minute) }
+	if err := s.Reserve(context.Background(), Manual); !errors.Is(err, ErrManualCooldown) {
 		t.Fatal("expected cooldown")
+	} else if got := err.Error(); got == ErrManualCooldown.Error() {
+		t.Fatal("cooldown error should report the remaining wait")
 	}
-	s.Now = func() time.Time { return now.Add(30 * time.Minute) }
+	s.Now = func() time.Time { return now.Add(5 * time.Minute) }
 	if err := s.Reserve(context.Background(), Manual); err != nil {
 		t.Fatalf("after cooldown: %v", err)
 	}

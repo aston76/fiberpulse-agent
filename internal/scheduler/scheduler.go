@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"time"
 )
@@ -15,7 +16,7 @@ const (
 
 	MaxAutomatic24H = 4
 	MaxTotal24H     = 8
-	ManualCooldown  = 30 * time.Minute
+	ManualCooldown  = 5 * time.Minute
 )
 
 var (
@@ -63,7 +64,8 @@ func (s Scheduler) Reserve(ctx context.Context, kind Kind) error {
 			return err
 		}
 		if !last.IsZero() && now.Sub(last) < ManualCooldown {
-			return ErrManualCooldown
+			remaining := ManualCooldown - now.Sub(last)
+			return fmt.Errorf("%w; next manual test available in %s", ErrManualCooldown, remaining.Round(time.Second))
 		}
 	}
 	return s.Store.ReserveAttempt(ctx, kind, now)
