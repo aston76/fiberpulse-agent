@@ -29,9 +29,11 @@ restores and restarts the prior binary if startup fails. See
 [`docs/UPDATE-SECURITY.md`](docs/UPDATE-SECURITY.md) for the manifest contract
 and the remaining release gates.
 
-Real M-Lab execution is disabled in ordinary development builds. It additionally
-requires recorded M-Lab consent and `FIBERPULSE_ENABLE_MLAB_DEV=1`. Automated
-tests use the deterministic fake provider.
+Real M-Lab NDT7 measurement is the default provider. It runs only after M-Lab
+consent is recorded in the local dashboard and stays within the scheduled
+quota of four automatic tests per day. Set `FIBERPULSE_DEV_FAKE=1` to force
+the deterministic fake provider during development; automated Go tests always
+use the fake provider.
 
 ## License
 

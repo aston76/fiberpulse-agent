@@ -56,7 +56,7 @@ func run() error {
 	if *postUpdate != "" {
 		logger.Info("post-update startup", "version", *postUpdate)
 	}
-	provider := measurement.Provider(&measurement.MLabProvider{ClientName: "fiberpulse-ph", ClientVersion: version, Enabled: os.Getenv("FIBERPULSE_ENABLE_MLAB_DEV") == "1", Timeout: 60 * time.Second})
+	provider := measurement.Provider(&measurement.MLabProvider{ClientName: "fiberpulse-ph", ClientVersion: version, Enabled: true, Timeout: 60 * time.Second})
 	if os.Getenv("FIBERPULSE_DEV_FAKE") == "1" {
 		provider = &measurement.FakeProvider{}
 	}
