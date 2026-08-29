@@ -10,9 +10,10 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=0.1.0-dev
+ARG SHARE_URL=
 RUN mkdir -p /out \
     && GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
-       go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION}" -o /out/fiberpulse.exe ./cmd/fiberpulse \
+       go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION} -X main.sharingEndpoint=${SHARE_URL}" -o /out/fiberpulse.exe ./cmd/fiberpulse \
     && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
        go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/fiberpulse-updater.exe ./cmd/fiberpulse-updater
 

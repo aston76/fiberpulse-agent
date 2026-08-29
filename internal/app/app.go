@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -28,11 +30,14 @@ import (
 	"github.com/google/uuid"
 )
 
-const consentPolicyVersion = "privacy-v1"
+const mlabConsentPolicyVersion = "privacy-v1"
+const sharingConsentPolicyVersion = "observatory-privacy-v1"
+const consentPolicyVersion = mlabConsentPolicyVersion // compatibility name for the existing M-Lab tests
 const incidentRuntimeSetting = "incident_runtime_v1"
 const connectivityRuntimeSetting = "connectivity_runtime_v1"
 const planSelectionSetting = "plan_selection_v1"
 const subscriberProfileSetting = "subscriber_profile_v1"
+const sharingIdentitySetting = "sharing_identity_v1"
 
 // PlanState exposes the subscriber's chosen ISP offer and, once a complete
 // measurement exists, how that measurement compares with the advertised plan.
@@ -63,6 +68,7 @@ type Config struct {
 	ProbeURL                string
 	DNSName                 string
 	SharingTransportEnabled bool
+	SharingTransport        sharing.Sender
 	Logger                  *slog.Logger
 	Sponsor                 sponsor.Offer
 }
@@ -99,6 +105,13 @@ type App struct {
 	closing      bool
 	closeOnce    sync.Once
 	closeErr     error
+	shareWake    chan struct{}
+}
+
+type persistedSharingIdentity struct {
+	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key"`
+	Sequence   uint64 `json:"sequence"`
 }
 
 type Snapshot struct {
@@ -154,7 +167,10 @@ func New(config Config) (*App, error) {
 	if inspector == nil {
 		inspector = network.SystemInspector{}
 	}
-	a := &App{config: config, store: store, inspector: inspector, ctx: ctx, cancel: cancel, lifecycle: LifecycleMachine{State: LifecycleStarting}, testMachine: measurement.TestMachine{State: measurement.TestIdle}, schedule: scheduler.Machine{State: scheduler.Recovered}}
+	if config.SharingTransport != nil {
+		config.SharingTransportEnabled = true
+	}
+	a := &App{config: config, store: store, inspector: inspector, ctx: ctx, cancel: cancel, lifecycle: LifecycleMachine{State: LifecycleStarting}, testMachine: measurement.TestMachine{State: measurement.TestIdle}, schedule: scheduler.Machine{State: scheduler.Recovered}, shareWake: make(chan struct{}, 1)}
 	a.health = health.Checker{Inspector: inspector, DNSName: config.DNSName, ProbeURL: config.ProbeURL}
 	a.scheduler = scheduler.Scheduler{Store: store}
 	a.local = localapi.New(a)
@@ -165,7 +181,7 @@ func New(config Config) (*App, error) {
 		return nil, fmt.Errorf("restore sharing consent: %w", err)
 	}
 	switch {
-	case sharingConsent.OccurredAt.IsZero():
+	case sharingConsent.OccurredAt.IsZero() || sharingConsent.PolicyVersion != sharingConsentPolicyVersion:
 		a.shareState.State = sharing.NotAsked
 	case sharingConsent.Granted && config.SharingTransportEnabled:
 		a.shareState.State = sharing.Enabled
@@ -238,6 +254,9 @@ func (a *App) Start() (string, error) {
 	a.runAsync(a.healthLoop)
 	a.runAsync(a.schedulerLoop)
 	a.runAsync(a.retentionLoop)
+	if a.config.SharingTransport != nil {
+		a.runAsync(a.sharingLoop)
+	}
 	a.config.Logger.Info("FiberPulse started", "dashboard", a.local.BaseURL(), "provider", a.config.Provider.Metadata().Name)
 	return a.local.BootstrapURL(), nil
 }
@@ -300,6 +319,9 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 	sharing, err := a.store.CurrentConsent(ctx, "fiberpulse")
 	if err != nil {
 		return nil, err
+	}
+	if sharing.PolicyVersion != sharingConsentPolicyVersion {
+		sharing.Granted = false
 	}
 	results, err := a.store.ListResults(ctx, 100)
 	if err != nil {
@@ -426,7 +448,7 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 			a.testMu.Lock()
 			defer a.testMu.Unlock()
 		}
-		if err := a.store.SetConsent(ctx, storage.Consent{Scope: body.Scope, Granted: body.Granted, PolicyVersion: consentPolicyVersion, Language: body.Language, Source: "local_dashboard"}); err != nil {
+		if err := a.store.SetConsent(ctx, storage.Consent{Scope: body.Scope, Granted: body.Granted, PolicyVersion: mlabConsentPolicyVersion, Language: body.Language, Source: "local_dashboard"}); err != nil {
 			return err
 		}
 		var stateErr error
@@ -596,7 +618,7 @@ func (a *App) setSharingConsent(ctx context.Context, granted bool, language stri
 	if err != nil {
 		return err
 	}
-	if !current.OccurredAt.IsZero() && current.Granted == granted {
+	if !current.OccurredAt.IsZero() && current.Granted == granted && current.PolicyVersion == sharingConsentPolicyVersion {
 		return nil
 	}
 	a.mu.RLock()
@@ -615,7 +637,7 @@ func (a *App) setSharingConsent(ctx context.Context, granted bool, language stri
 		a.shareState = machine
 		a.mu.Unlock()
 	}
-	if err := a.store.SetConsent(ctx, storage.Consent{Scope: "fiberpulse", Granted: granted, PolicyVersion: consentPolicyVersion, Language: language, Source: "local_dashboard"}); err != nil {
+	if err := a.store.SetConsent(ctx, storage.Consent{Scope: "fiberpulse", Granted: granted, PolicyVersion: sharingConsentPolicyVersion, Language: language, Source: "local_dashboard"}); err != nil {
 		if !initialDecline {
 			if transitionErr := machine.Transition(sharing.Error); transitionErr != nil {
 				err = errors.Join(err, transitionErr)
@@ -643,6 +665,9 @@ func (a *App) setSharingConsent(ctx context.Context, granted bool, language stri
 	a.mu.Lock()
 	a.shareState = machine
 	a.mu.Unlock()
+	if granted {
+		a.wakeSharing()
+	}
 	return nil
 }
 
@@ -1031,10 +1056,116 @@ func (a *App) queueMeasurementForSharing(ctx context.Context, result measurement
 	if !consent.Granted {
 		return false, errors.New("sharing state is enabled without consent")
 	}
-	if err := a.store.QueueShare(ctx, result.ID, "measurement", sharedMeasurement(result)); err != nil {
+	if result.Status != measurement.StatusComplete || !result.PublicEligible {
+		return false, nil
+	}
+	event := sharedMeasurement(result, a.sharePlan(ctx))
+	if err := a.store.QueueShare(ctx, result.ID, "measurement", event); err != nil {
 		return false, err
 	}
+	a.wakeSharing()
 	return true, nil
+}
+
+func (a *App) wakeSharing() {
+	select {
+	case a.shareWake <- struct{}{}:
+	default:
+	}
+}
+
+func (a *App) sharingLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	a.flushSharingQueue()
+	for {
+		select {
+		case <-a.ctx.Done():
+			return
+		case <-ticker.C:
+			a.flushSharingQueue()
+		case <-a.shareWake:
+			a.flushSharingQueue()
+		}
+	}
+}
+
+func (a *App) flushSharingQueue() {
+	a.sharingMu.Lock()
+	defer a.sharingMu.Unlock()
+	consent, err := a.store.CurrentConsent(a.ctx, "fiberpulse")
+	if err != nil || !consent.Granted {
+		return
+	}
+	items, err := a.store.DueShares(a.ctx, time.Now().UTC(), 10)
+	if err != nil {
+		a.config.Logger.Warn("anonymous sharing queue read failed", "error", err)
+		return
+	}
+	for _, item := range items {
+		identity, sequence, err := a.nextSharingIdentity(a.ctx)
+		if err == nil {
+			ctx, cancel := context.WithTimeout(a.ctx, 20*time.Second)
+			err = a.config.SharingTransport.Send(ctx, identity, sequence, item.Payload)
+			cancel()
+		}
+		if err == nil {
+			if err = a.store.CompleteShare(a.ctx, item.ID); err != nil {
+				a.config.Logger.Warn("anonymous sharing acknowledgement failed", "event_id", item.ID, "error", err)
+				return
+			}
+			continue
+		}
+		delay := shareRetryDelay(item.AttemptCount + 1)
+		if retryErr := a.store.RetryShare(a.ctx, item.ID, "transport_failure", time.Now().UTC().Add(delay)); retryErr != nil {
+			a.config.Logger.Warn("anonymous sharing retry scheduling failed", "event_id", item.ID, "error", retryErr)
+		}
+		a.config.Logger.Warn("anonymous sharing delivery deferred", "event_id", item.ID, "retry_in", delay, "error", err)
+		return
+	}
+}
+
+func shareRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	if attempt > 9 {
+		attempt = 9
+	}
+	delay := time.Minute * time.Duration(1<<uint(attempt-1))
+	if delay > 6*time.Hour {
+		return 6 * time.Hour
+	}
+	return delay
+}
+
+func (a *App) nextSharingIdentity(ctx context.Context) (sharing.Identity, uint64, error) {
+	var saved persistedSharingIdentity
+	found, err := a.store.GetSetting(ctx, sharingIdentitySetting, &saved)
+	if err != nil {
+		return sharing.Identity{}, 0, err
+	}
+	var identity sharing.Identity
+	if found {
+		public, publicErr := base64.StdEncoding.DecodeString(saved.PublicKey)
+		private, privateErr := base64.StdEncoding.DecodeString(saved.PrivateKey)
+		if publicErr != nil || privateErr != nil || len(public) != ed25519.PublicKeySize || len(private) != ed25519.PrivateKeySize {
+			return sharing.Identity{}, 0, errors.New("invalid persisted sharing identity")
+		}
+		identity = sharing.Identity{Public: ed25519.PublicKey(public), Private: ed25519.PrivateKey(private)}
+	} else {
+		identity, err = sharing.NewIdentity()
+		if err != nil {
+			return sharing.Identity{}, 0, err
+		}
+		saved.PublicKey = base64.StdEncoding.EncodeToString(identity.Public)
+		saved.PrivateKey = base64.StdEncoding.EncodeToString(identity.Private)
+	}
+	saved.Sequence++
+	if err := a.store.SetSetting(ctx, sharingIdentitySetting, saved); err != nil {
+		return sharing.Identity{}, 0, err
+	}
+	return identity, saved.Sequence, nil
 }
 
 func (a *App) healthLoop() {
@@ -1275,7 +1406,31 @@ func (a *App) dismissIncident(ctx context.Context, id string) error {
 	return nil
 }
 
-func sharedMeasurement(r measurement.Result) map[string]any {
+func (a *App) sharePlan(ctx context.Context) *plan.Offer {
+	selection, found, err := a.loadPlanSelection(ctx)
+	if err != nil || !found {
+		return nil
+	}
+	if selection.Custom != nil {
+		offer, err := plan.ValidateCustom(*selection.Custom)
+		if err != nil {
+			return nil
+		}
+		// Free-form provider and offer names may accidentally contain account
+		// information. Keep only the non-identifying, structured plan values.
+		offer.ISP = "Unlisted provider"
+		offer.Name = "Custom plan"
+		offer.Category = "Subscriber-entered"
+		return &offer
+	}
+	offer, ok := plan.Find(selection.OfferID)
+	if !ok {
+		return nil
+	}
+	return &offer
+}
+
+func sharedMeasurement(r measurement.Result, offer *plan.Offer) sharing.MeasurementEvent {
 	bucket := r.StartedAt.UTC().Truncate(15 * time.Minute)
 	quality := "unknown"
 	if r.NetworkBefore.ConnectionType == measurement.ConnectionWiFi {
@@ -1290,5 +1445,24 @@ func sharedMeasurement(r measurement.Result) map[string]any {
 			quality = "poor"
 		}
 	}
-	return map[string]any{"event_id": r.ID, "timestamp_bucket": bucket.Format(time.RFC3339), "provider": r.Provider, "protocol_version": r.ProtocolVersion, "agent_version": r.ClientVersion, "schema_version": measurement.SchemaVersion, "methodology_version": measurement.MethodologyVersion, "confidence_version": measurement.ConfidenceVersion, "status": r.Status, "server_fqdn": r.ServerFQDN, "download_bps": r.DownloadBPS, "upload_bps": r.UploadBPS, "min_rtt_us": r.MinRTTUS, "bytes_down": r.BytesDown, "bytes_up": r.BytesUp, "connection_type": r.NetworkBefore.ConnectionType, "wifi_quality_bucket": quality, "metered": r.NetworkBefore.Metered, "vpn_suspected": r.NetworkBefore.VPNDetected, "proxy_suspected": r.NetworkBefore.ProxyDetected, "confidence_score": r.ConfidenceScore, "confidence_level": r.ConfidenceLevel, "confidence_reasons": r.ConfidenceReasons}
+	event := sharing.MeasurementEvent{
+		EventID: r.ID, TimestampBucket: bucket, MeasurementProvider: r.Provider,
+		ProtocolVersion: r.ProtocolVersion, AgentVersion: r.ClientVersion,
+		SchemaVersion: measurement.SchemaVersion, MethodologyVersion: measurement.MethodologyVersion,
+		ConfidenceVersion: measurement.ConfidenceVersion, ServerFQDN: r.ServerFQDN,
+		DownloadBPS: r.DownloadBPS, UploadBPS: r.UploadBPS, MinRTTUS: r.MinRTTUS,
+		ConnectionType: string(r.NetworkBefore.ConnectionType), WiFiQualityBucket: quality,
+		ConfidenceScore: r.ConfidenceScore, ConfidenceLevel: r.ConfidenceLevel, PublicEligible: r.PublicEligible,
+	}
+	if offer != nil {
+		event.PlanCountryCode = offer.CountryCode
+		event.PlanCountryName = offer.CountryName
+		event.ISP = offer.ISP
+		event.OfferName = offer.Name
+		event.SubscriptionType = offer.Category
+		event.AdvertisedDownloadMbps = offer.DownloadMbps
+		event.AdvertisedUploadMbps = offer.UploadMbps
+		event.CatalogOffer = !offer.Custom
+	}
+	return event
 }

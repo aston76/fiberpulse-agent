@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Explore privacy-preserving Internet performance measurements shared by FiberPulse users.">
+  <title>FiberPulse Observatory</title>
+  <link rel="stylesheet" href="/styles.css?v=2">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="FiberPulse Observatory home">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span><b>FiberPulse</b><small>Global Observatory</small></span>
+    </a>
+    <span class="privacy-chip"><i></i> Privacy-preserving public data</span>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">REAL CONNECTIONS · SHARED VOLUNTARILY</p>
+        <h1>See how Internet plans perform in the real world.</h1>
+        <p class="hero-lead">Search independent M-Lab measurements by country, city, provider or subscription. No names, account numbers, addresses, exact IPs or device identifiers are published.</p>
+      </div>
+      <div class="pulse-orbit" aria-hidden="true"><span></span><span></span><span></span><b>LIVE</b></div>
+    </section>
+
+    <section class="stats" aria-label="Observatory statistics">
+      <article><span>Measurements</span><strong id="stat-measurements">—</strong><small>eligible public tests</small></article>
+      <article><span>Countries</span><strong id="stat-countries">—</strong><small>coarse locations only</small></article>
+      <article><span>Providers</span><strong id="stat-providers">—</strong><small>declared subscriptions</small></article>
+      <article class="accent"><span>Average download</span><strong><span id="stat-download">—</span> <em>Mbps</em></strong><small>across the public dataset</small></article>
+    </section>
+
+    <section class="explorer">
+      <div class="section-heading">
+        <div><p class="eyebrow">CONNECTION EXPLORER</p><h2>Latest public measurements</h2></div>
+        <span id="result-count" class="result-count">Loading…</span>
+      </div>
+
+      <form id="search-form" class="search-panel" role="search">
+        <label class="search-box">
+          <span aria-hidden="true">⌕</span>
+          <input id="search" name="q" type="search" maxlength="120" autocomplete="off" placeholder="Search city, provider, offer or plan type">
+        </label>
+        <label><span>Country</span><select id="country" name="country"><option value="">All countries</option></select></label>
+        <label><span>Provider</span><select id="provider" name="provider"><option value="">All providers</option></select></label>
+        <button type="submit">Search measurements</button>
+      </form>
+
+      <div class="table-shell">
+        <div class="table-head" aria-hidden="true"><span>Place & time</span><span>Subscription</span><span>Download</span><span>Upload</span><span>Latency</span><span>Context</span></div>
+        <div id="results" class="results" aria-live="polite"></div>
+        <div id="empty" class="empty" hidden><span class="empty-mark">⌁</span><h3>No measurement found</h3><p>Try a broader city, provider or country search.</p></div>
+      </div>
+
+      <nav class="pagination" aria-label="Measurement pages">
+        <button id="previous" type="button">← Previous</button>
+        <span id="page-label">Page 1</span>
+        <button id="next" type="button">Next →</button>
+      </nav>
+    </section>
+
+    <section class="privacy-explainer">
+      <div><p class="eyebrow">PUBLIC BY DESIGN, PRIVATE BY DEFAULT</p><h2>Useful network evidence, without a customer profile.</h2></div>
+      <div class="privacy-grid">
+        <article><b>Included</b><p>15-minute time bucket, country and city area, measured speed, latency, connection type and public plan details.</p></article>
+        <article><b>Never published</b><p>Name, email, phone, account number, street address, exact IP, GPS, SSID, hostname, hardware profile or local logs.</p></article>
+        <article><b>User controlled</b><p>Sharing is separate from the speed test permission, starts only after opt-in and can be disabled in the application.</p></article>
+      </div>
+    </section>
+  </main>
+
+  <footer><span>FiberPulse Observatory</span><p>Independent measurements powered by M-Lab NDT7. Geolocation is approximate.</p></footer>
+  <script src="/app.js?v=3" defer></script>
+</body>
+</html>

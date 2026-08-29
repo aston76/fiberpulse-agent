@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"fiberpulse.dev/agent/internal/health"
 	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/measurement"
+	"fiberpulse.dev/agent/internal/observatory"
 	"fiberpulse.dev/agent/internal/plan"
 	"fiberpulse.dev/agent/internal/reporting"
 	"fiberpulse.dev/agent/internal/scheduler"
@@ -419,7 +421,7 @@ func TestGrantedSharingRestoresSuspendedWithoutTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetConsent(ctx, storage.Consent{Scope: "fiberpulse", Granted: true, PolicyVersion: consentPolicyVersion}); err != nil {
+	if err := store.SetConsent(ctx, storage.Consent{Scope: "fiberpulse", Granted: true, PolicyVersion: sharingConsentPolicyVersion}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -470,6 +472,100 @@ func TestSharingRevocationPurgesConcurrentQueue(t *testing.T) {
 	count, err := a.store.ShareQueueCount(ctx)
 	if err != nil || count != 0 {
 		t.Fatalf("queue count=%d err=%v", count, err)
+	}
+}
+
+func TestAnonymousMeasurementTravelsFromAgentQueueToObservatory(t *testing.T) {
+	ctx := context.Background()
+	hubStore, err := observatory.OpenStore(filepath.Join(t.TempDir(), "observatory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hubStore.Close()
+	hub, err := observatory.NewServer(observatory.Config{Store: hubStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(hub.Handler())
+	defer httpServer.Close()
+	transport, err := sharing.NewHTTPTransport(httpServer.URL, httpServer.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(Config{Version: "test", DatabasePath: filepath.Join(t.TempDir(), "fiberpulse.db"), Provider: &measurement.FakeProvider{}, SharingTransport: transport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if err := a.setPlanSelection(ctx, "converge-super-prime-2099"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Action(ctx, "consent", []byte(`{"scope":"fiberpulse","granted":true,"language":"en"}`)); err != nil {
+		t.Fatal(err)
+	}
+	result := measurement.Result{
+		ID: "11111111-1111-4111-8111-111111111111", Provider: measurement.ProviderMLabNDT7,
+		ProtocolVersion: "ndt7", ClientVersion: "test", StartedAt: time.Now().UTC(), CompletedAt: time.Now().UTC(),
+		DownloadBPS: 620_000_000, UploadBPS: 410_000_000, MinRTTUS: 8_000, Status: measurement.StatusComplete,
+		NetworkBefore:   measurement.NetworkContext{ConnectionType: measurement.ConnectionEthernet},
+		ConfidenceScore: 95, ConfidenceLevel: "high", PublicEligible: true,
+	}
+	queued, err := a.queueMeasurementForSharing(ctx, result)
+	if err != nil || !queued {
+		t.Fatalf("queued=%v err=%v", queued, err)
+	}
+	a.flushSharingQueue()
+	count, err := a.store.ShareQueueCount(ctx)
+	if err != nil || count != 0 {
+		t.Fatalf("queue count=%d err=%v", count, err)
+	}
+	public, err := hubStore.Search(ctx, observatory.SearchParams{Query: "Converge", Page: 1, Limit: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if public.Total != 1 || public.Items[0].CountryCode != "PH" || public.Items[0].ISP != "Converge ICT" || public.Items[0].OfferName != "Super FiberX Prime 2099" {
+		t.Fatalf("public result=%+v", public)
+	}
+}
+
+func TestCustomPlanFreeTextIsRedactedBeforeSharing(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	err := a.setCustomPlanSelection(ctx, plan.Offer{CountryCode: "PH", CountryName: "Philippines", ISP: "Account 123 Alain", Name: "Bill reference 456", DownloadMbps: 900, UploadMbps: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	offer := a.sharePlan(ctx)
+	if offer == nil || offer.ISP != "Unlisted provider" || offer.Name != "Custom plan" || offer.DownloadMbps != 900 || offer.UploadMbps != 500 || offer.CountryCode != "PH" {
+		t.Fatalf("shared custom offer=%+v", offer)
+	}
+}
+
+func TestLegacySharingConsentRequiresFreshObservatoryOptIn(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fiberpulse.db")
+	store, err := storage.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetConsent(ctx, storage.Consent{Scope: "fiberpulse", Granted: true, PolicyVersion: "privacy-v1"}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	a, err := New(Config{Version: "test", DatabasePath: path, Provider: &measurement.FakeProvider{}, SharingTransportEnabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if a.shareState.State != sharing.NotAsked {
+		t.Fatalf("legacy consent restored as %s", a.shareState.State)
+	}
+	snapshotAny, err := a.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshotAny.(Snapshot).SharingConsent.Granted {
+		t.Fatal("legacy sharing consent was presented as current")
 	}
 }
 

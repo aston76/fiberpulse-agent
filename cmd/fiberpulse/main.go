@@ -15,10 +15,12 @@ import (
 	"fiberpulse.dev/agent/internal/app"
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/platform"
+	"fiberpulse.dev/agent/internal/sharing"
 	"fiberpulse.dev/agent/internal/sponsor"
 )
 
 var version = "0.1.0-dev"
+var sharingEndpoint = ""
 
 func main() {
 	if err := run(); err != nil {
@@ -66,7 +68,19 @@ func run() error {
 		Headline: os.Getenv("FIBERPULSE_SPONSOR_HEADLINE"), Body: os.Getenv("FIBERPULSE_SPONSOR_BODY"),
 		CTA: os.Getenv("FIBERPULSE_SPONSOR_CTA"), URL: os.Getenv("FIBERPULSE_SPONSOR_URL"),
 	}
-	agent, err := app.New(app.Config{Version: version, DatabasePath: filepath.Join(dataDir, "fiberpulse.db"), Provider: provider, ProbeURL: os.Getenv("FIBERPULSE_PROBE_URL"), DNSName: os.Getenv("FIBERPULSE_DNS_NAME"), Sponsor: sponsorOffer, Logger: logger})
+	shareURL := os.Getenv("FIBERPULSE_SHARE_URL")
+	if shareURL == "" {
+		shareURL = sharingEndpoint
+	}
+	var shareTransport sharing.Sender
+	if shareURL != "" {
+		transport, transportErr := sharing.NewHTTPTransport(shareURL, nil)
+		if transportErr != nil {
+			return fmt.Errorf("configure anonymous sharing: %w", transportErr)
+		}
+		shareTransport = transport
+	}
+	agent, err := app.New(app.Config{Version: version, DatabasePath: filepath.Join(dataDir, "fiberpulse.db"), Provider: provider, ProbeURL: os.Getenv("FIBERPULSE_PROBE_URL"), DNSName: os.Getenv("FIBERPULSE_DNS_NAME"), SharingTransport: shareTransport, Sponsor: sponsorOffer, Logger: logger})
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@
 set -eu
 
 version="${FIBERPULSE_VERSION:-0.1.0-dev}"
+share_url="${FIBERPULSE_SHARE_URL:-}"
 output_root="${1:-dist/macos}"
 app_path="${output_root}/FiberPulse.app"
 deployment_target="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
@@ -41,7 +42,7 @@ for goarch in arm64 amd64; do
   esac
   arch_root="$build_root/$goarch"
   mkdir -p "$arch_root"
-  build_binary "$arch_root/fiberpulse" ./cmd/fiberpulse "-s -w -X main.version=$version"
+  build_binary "$arch_root/fiberpulse" ./cmd/fiberpulse "-s -w -X main.version=$version -X main.sharingEndpoint=$share_url"
   build_binary "$arch_root/fiberpulse-updater" ./cmd/fiberpulse-updater "-s -w"
 done
 lipo -create "$build_root/arm64/fiberpulse" "$build_root/amd64/fiberpulse" -output "$app_path/Contents/MacOS/fiberpulse"

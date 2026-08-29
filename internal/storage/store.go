@@ -40,6 +40,15 @@ type Consent struct {
 	OccurredAt    time.Time `json:"occurred_at"`
 }
 
+type ShareQueueItem struct {
+	ID            string
+	EventType     string
+	Payload       []byte
+	CreatedAt     time.Time
+	NextAttemptAt time.Time
+	AttemptCount  int
+}
+
 func Open(path string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("database path is required")
@@ -307,6 +316,44 @@ func (s *Store) QueueShare(ctx context.Context, id, eventType string, payload an
 	}
 	now := time.Now().UTC()
 	_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO share_queue(id,event_type,payload_json,created_at,next_attempt_at) VALUES(?,?,?,?,?)`, id, eventType, string(encoded), formatTime(now), formatTime(now))
+	return err
+}
+
+func (s *Store) DueShares(ctx context.Context, now time.Time, limit int) ([]ShareQueueItem, error) {
+	if limit < 1 || limit > 100 {
+		return nil, errors.New("share queue limit must be between 1 and 100")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,event_type,payload_json,created_at,next_attempt_at,attempt_count
+		FROM share_queue WHERE next_attempt_at <= ? ORDER BY created_at LIMIT ?`, formatTime(now), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ShareQueueItem, 0, limit)
+	for rows.Next() {
+		var item ShareQueueItem
+		var payload, created, next string
+		if err := rows.Scan(&item.ID, &item.EventType, &payload, &created, &next, &item.AttemptCount); err != nil {
+			return nil, err
+		}
+		item.Payload = []byte(payload)
+		item.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		item.NextAttemptAt, _ = time.Parse(time.RFC3339Nano, next)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) CompleteShare(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM share_queue WHERE id=?", id)
+	return err
+}
+
+func (s *Store) RetryShare(ctx context.Context, id, errorCode string, next time.Time) error {
+	if len(errorCode) > 80 {
+		errorCode = errorCode[:80]
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE share_queue SET attempt_count=attempt_count+1,last_error_code=?,next_attempt_at=? WHERE id=?`, errorCode, formatTime(next), id)
 	return err
 }
 

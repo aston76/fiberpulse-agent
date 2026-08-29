@@ -105,8 +105,8 @@ function SharingPermission({ busy, error, onSave, onClose }: { busy: boolean; er
   const [checked, setChecked] = useState(false);
   return <div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="sharing-title">
     <div class="modal-icon">♥</div><p class="eyebrow">Optional</p><h2 id="sharing-title">Help improve Internet data?</h2>
-    <p class="modal-lead">Share anonymous measurement results with FiberPulse. This is separate from speed testing.</p>
-    <div class="permission-points"><p><b>No account or contact details</b><span>No email, hostname, exact IP, SSID, GPS or local logs are stored.</span></p><p><b>You stay in control</b><span>Disable sharing anytime; the local queue is immediately cleared.</span></p></div>
+    <p class="modal-lead">Share privacy-preserving measurement results with the public FiberPulse Observatory. This is separate from speed testing.</p>
+    <div class="permission-points"><p><b>What becomes public</b><span>A 15-minute time bucket, approximate city area, measured speed, latency, connection type and the public details of your selected plan.</span></p><p><b>No account or device profile</b><span>No name, email, account number, street address, exact IP, GPS, SSID, hostname, hardware profile or local logs are published.</span></p><p><b>You stay in control</b><span>Disable sharing anytime; delivery stops and the local queue is cleared. Measurements already published remain in the anonymous statistical dataset.</span></p></div>
     <label class="check"><input type="checkbox" checked={checked} onChange={event => setChecked(event.currentTarget.checked)} /><span>I understand which minimal fields are shared.</span></label>
     {error && <p class="inline-error" role="alert">{error}</p>}
     <div class="modal-actions"><button class="button quiet" disabled={busy} onClick={onClose}>Cancel</button><button class="button primary" disabled={busy || !checked} onClick={() => onSave(true)}>Enable sharing</button></div>
