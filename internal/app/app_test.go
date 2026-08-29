@@ -14,6 +14,7 @@ import (
 	"fiberpulse.dev/agent/internal/health"
 	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/measurement"
+	"fiberpulse.dev/agent/internal/plan"
 	"fiberpulse.dev/agent/internal/reporting"
 	"fiberpulse.dev/agent/internal/scheduler"
 	"fiberpulse.dev/agent/internal/sharing"
@@ -201,6 +202,57 @@ func TestConsentRejectsUnknownScope(t *testing.T) {
 	a := newTestApp(t)
 	if err := a.Action(context.Background(), "consent", []byte(`{"scope":"invented","granted":true,"language":"en"}`)); err == nil {
 		t.Fatal("unknown consent scope was stored")
+	}
+}
+
+func TestPlanSelectionDrivesSnapshotVerdict(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	if err := a.store.SetConsent(ctx, storage.Consent{Scope: "mlab", Granted: true, PolicyVersion: consentPolicyVersion}); err != nil {
+		t.Fatal(err)
+	}
+	a.runTest(scheduler.Manual, measurement.NetworkContext{Online: true, ConnectionType: measurement.ConnectionEthernet})
+
+	snapshot := func() Snapshot {
+		raw, err := a.Snapshot(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw.(Snapshot)
+	}
+	if got := snapshot().Plan; got != nil {
+		t.Fatalf("plan without selection: %+v", got)
+	}
+	if err := a.Action(ctx, "plan", []byte(`{"offer_id":"invented"}`)); !errors.Is(err, plan.ErrUnknownOffer) {
+		t.Fatalf("unknown offer accepted: %v", err)
+	}
+
+	// The fake provider measures 100 Mbps down: exactly the DITO 100 plan.
+	if err := a.Action(ctx, "plan", []byte(`{"offer_id":"dito-home-100"}`)); err != nil {
+		t.Fatal(err)
+	}
+	state := snapshot().Plan
+	if state == nil || state.Verdict == nil {
+		t.Fatalf("missing plan verdict: %+v", state)
+	}
+	if state.Verdict.Level != plan.LevelOnPar || state.Verdict.DownloadPct != 100 || state.Verdict.ComplaintWorthy {
+		t.Fatalf("unexpected on-par verdict: %+v", state.Verdict)
+	}
+
+	// The same measurement against a 400 Mbps plan is complaint-worthy.
+	if err := a.Action(ctx, "plan", []byte(`{"offer_id":"pldt-fibr-400"}`)); err != nil {
+		t.Fatal(err)
+	}
+	state = snapshot().Plan
+	if state == nil || state.Verdict == nil || state.Verdict.Level != plan.LevelWellBelow || !state.Verdict.ComplaintWorthy {
+		t.Fatalf("unexpected well-below verdict: %+v", state)
+	}
+
+	if err := a.Action(ctx, "plan", []byte(`{"offer_id":""}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot().Plan; got != nil {
+		t.Fatalf("cleared plan still present: %+v", got)
 	}
 }
 

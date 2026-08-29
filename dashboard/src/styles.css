@@ -69,6 +69,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visibl
 .quick-icon { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 12px; font-size: 1.2rem; font-weight: 900; }
 .quick-icon.green { color: var(--green); background: #083429; }
 .quick-icon.amber { color: var(--amber); background: #352a13; }
+.quick-icon.red { color: var(--red); background: #3d1720; }
+.quick-icon.cyan { color: var(--cyan); background: #0a2733; }
 .quick-card div { min-width: 0; }
 .quick-card small { color: #55d8ff; letter-spacing: .1em; font-size: .58rem; font-weight: 850; }
 .quick-card h2 { margin: 3px 0; font-size: 1.02rem; overflow-wrap: anywhere; }
@@ -132,6 +134,13 @@ footer { display: flex; justify-content: space-between; gap: 15px; padding: 24px
 .setting-row b { font-size: .85rem; }
 .setting-row span { color: var(--muted); font-size: .7rem; }
 .settings-note { margin: 18px 0 0; padding: 12px; color: #9cb0c3; background: #0a1a2d; border-radius: 9px; font-size: .69rem; text-align: center; }
+
+.modal-text { color: #b2c0cf; font-size: .78rem; line-height: 1.55; }
+.plan-field { display: grid; gap: 6px; margin-top: 14px; }
+.plan-field span { color: #55d8ff; letter-spacing: .1em; font-size: .58rem; font-weight: 850; text-transform: uppercase; }
+.plan-field select { width: 100%; padding: 11px 12px; color: #f5f9ff; background: #0a1b2f; border: 1px solid #284863; border-radius: 10px; font: inherit; }
+.plan-field select:focus-visible { outline: 3px solid #70e8ff; outline-offset: 2px; }
+.plan-note { margin: 12px 0 0; padding: 10px 12px; color: #9cb0c3; background: #0a1a2d; border-radius: 9px; font-size: .69rem; }
 
 @media (max-width: 760px) {
   .shell { width: min(100% - 24px, 1040px); }

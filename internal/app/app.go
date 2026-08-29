@@ -18,6 +18,7 @@ import (
 	"fiberpulse.dev/agent/internal/localapi"
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/network"
+	"fiberpulse.dev/agent/internal/plan"
 	"fiberpulse.dev/agent/internal/reporting"
 	"fiberpulse.dev/agent/internal/scheduler"
 	"fiberpulse.dev/agent/internal/sharing"
@@ -28,6 +29,14 @@ import (
 const consentPolicyVersion = "privacy-v1"
 const incidentRuntimeSetting = "incident_runtime_v1"
 const connectivityRuntimeSetting = "connectivity_runtime_v1"
+const planSelectionSetting = "plan_selection_v1"
+
+// PlanState exposes the subscriber's chosen ISP offer and, once a complete
+// measurement exists, how that measurement compares with the advertised plan.
+type PlanState struct {
+	Offer   plan.Offer    `json:"offer"`
+	Verdict *plan.Verdict `json:"verdict,omitempty"`
+}
 
 var ErrMeasurementBusy = errors.New("a measurement is already running")
 
@@ -91,6 +100,8 @@ type Snapshot struct {
 	ShareQueueCount   int                  `json:"share_queue_count"`
 	SharingAvailable  bool                 `json:"sharing_available"`
 	Baseline          baseline.Result      `json:"baseline"`
+	Plan              *PlanState           `json:"plan,omitempty"`
+	PlanCatalog       []plan.Offer         `json:"plan_catalog"`
 	Incidents         []incidents.Record   `json:"incidents"`
 	Reports           []reporting.Record   `json:"reports"`
 	LastError         string               `json:"last_error,omitempty"`
@@ -272,12 +283,36 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	personalBaseline := calculateBaseline(results)
+	planState := a.currentPlan(ctx, results)
 	a.connectMu.Lock()
 	connectivityState := a.connectivity.State()
 	a.connectMu.Unlock()
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return Snapshot{Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), ConnectivityState: string(connectivityState), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
+	return Snapshot{Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), ConnectivityState: string(connectivityState), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Plan: planState, PlanCatalog: plan.Catalog(), Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
+}
+
+// currentPlan resolves the persisted plan selection and, when a complete
+// measurement exists, assesses the latest one against the advertised offer.
+func (a *App) currentPlan(ctx context.Context, results []measurement.Result) *PlanState {
+	var offerID string
+	found, err := a.store.GetSetting(ctx, planSelectionSetting, &offerID)
+	if err != nil || !found || offerID == "" {
+		return nil
+	}
+	offer, ok := plan.Find(offerID)
+	if !ok {
+		return nil
+	}
+	state := &PlanState{Offer: offer}
+	for _, result := range results {
+		if result.Status == measurement.StatusComplete && result.DownloadBPS > 0 {
+			verdict := plan.Assess(offer, result.DownloadBPS, result.UploadBPS)
+			state.Verdict = &verdict
+			break
+		}
+	}
+	return state
 }
 
 func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) error {
@@ -341,6 +376,14 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 	case "quit":
 		a.cancel()
 		return nil
+	case "plan":
+		var body struct {
+			OfferID string `json:"offer_id"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return err
+		}
+		return a.setPlanSelection(ctx, body.OfferID)
 	case "incident-dismiss":
 		var body struct {
 			ID string `json:"id"`
@@ -360,6 +403,19 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 	default:
 		return fmt.Errorf("unknown action %q", name)
 	}
+}
+
+// setPlanSelection persists the subscriber's chosen offer; an empty id clears
+// the selection. Unknown offers are rejected so the catalog stays the single
+// source of truth for plan metadata.
+func (a *App) setPlanSelection(ctx context.Context, offerID string) error {
+	if offerID == "" {
+		return a.store.SetSetting(ctx, planSelectionSetting, "")
+	}
+	if _, ok := plan.Find(offerID); !ok {
+		return plan.ErrUnknownOffer
+	}
+	return a.store.SetSetting(ctx, planSelectionSetting, offerID)
 }
 
 // SetPaused persists the scheduler decision before publishing it to the rest of
