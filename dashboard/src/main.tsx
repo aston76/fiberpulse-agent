@@ -5,19 +5,19 @@ import "uplot/dist/uPlot.min.css";
 import brandMark from "./assets/fiberpulse-mark.png";
 import "./styles.css";
 
-type Consent = { scope: string; granted: boolean; policy_version: string; occurred_at?: string };
-type Network = { connection_type: string; wifi_quality?: number; metered: boolean; roaming: boolean; vpn_suspected: boolean; proxy_suspected: boolean; online: boolean };
-type Health = { at?: string; state: string; category: string; dns_configured: boolean; dns_ok: boolean; probe_configured: boolean; probe_ok: boolean; probe_rtt_us: number; network: Network };
-type Measurement = { id: string; started_at: string; provider: string; server_fqdn?: string; download_bps: number; upload_bps: number; min_rtt_us: number; status: string; confidence_score: number; confidence_level: string; confidence_reasons?: string[]; public_eligible: boolean };
-type Baseline = { maturity: string; count: number; days: number; download_median_bps: number; download_mad_bps: number; upload_median_bps: number; min_rtt_median_us: number };
-type Incident = { id: string; category: string; state: string; suspected_at: string; active_at?: string; recovering_at?: string; resolved_at?: string; updated_at: string };
-type Report = { id: string; format: "pdf" | "csv"; state: string; period_start: string; period_end: string; byte_count: number; error_code?: string; created_at: string; updated_at: string };
-type Status = { version: string; state: string; test_state: string; scheduler_state: string; connectivity_state: string; paused: boolean; next_automatic_test?: string; provider: { name: string; enabled: boolean }; mlab_consent: Consent; sharing_consent: Consent; sharing_state: string; sharing_available: boolean; last_health: Health; measurements: Measurement[]; share_queue_count: number; baseline: Baseline; incidents: Incident[]; reports: Report[]; last_error?: string };
+type Consent = { granted: boolean; policy_version?: string; occurred_at?: string };
+type Network = { connection_type?: string; metered?: boolean; roaming?: boolean; vpn_suspected?: boolean; proxy_suspected?: boolean; online?: boolean };
+type Health = { state?: string; category?: string; dns_configured?: boolean; dns_ok?: boolean; probe_configured?: boolean; probe_ok?: boolean; network?: Network };
+type Measurement = { id: string; started_at: string; download_bps: number; upload_bps: number; min_rtt_us: number; status: string; confidence_score: number; confidence_level: string; public_eligible: boolean };
+type Baseline = { maturity: string; count: number; days: number; download_median_bps: number; upload_median_bps: number; min_rtt_median_us: number };
+type Incident = { id: string; category: string; state: string; suspected_at: string; resolved_at?: string };
+type Status = { version: string; test_state: string; scheduler_state: string; connectivity_state: string; paused: boolean; next_automatic_test?: string; provider: { name: string; enabled: boolean }; mlab_consent: Consent; sharing_consent: Consent; sharing_state: string; sharing_available: boolean; last_health?: Health; measurements?: Measurement[]; share_queue_count: number; baseline?: Baseline; incidents?: Incident[]; last_error?: string };
 type Envelope = { csrf_token: string; data: Status };
 
-const fmtMbps = (value = 0) => `${(value / 1_000_000).toFixed(1)} Mbps`;
-const fmtRTT = (value = 0) => value > 0 ? `${(value / 1000).toFixed(1)} ms` : "—";
-const fmtDate = (value?: string) => value ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "Not scheduled";
+const mbps = (value = 0) => value > 0 ? (value / 1_000_000).toFixed(value >= 100_000_000 ? 0 : 1) : "—";
+const latency = (value = 0) => value > 0 ? (value / 1000).toFixed(value >= 100_000 ? 0 : 1) : "—";
+const date = (value?: string) => value ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "Not scheduled";
+const words = (value = "unknown") => value.replaceAll("_", " ");
 
 function useStatus() {
   const [envelope, setEnvelope] = useState<Envelope>();
@@ -25,103 +25,172 @@ function useStatus() {
   const refresh = async () => {
     try {
       const response = await fetch("/api/v1/status", { credentials: "same-origin", cache: "no-store" });
-      if (!response.ok) throw new Error(`Status request failed (${response.status})`);
-      setEnvelope(await response.json()); setError("");
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Dashboard connection failed"); }
+      if (!response.ok) throw new Error(`Status unavailable (${response.status})`);
+      setEnvelope(await response.json());
+      setError("");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reach FiberPulse"); }
   };
   useEffect(() => { void refresh(); const timer = window.setInterval(refresh, 10_000); return () => window.clearInterval(timer); }, []);
   const action = async (name: string, body: unknown = {}) => {
     if (!envelope) return;
     const response = await fetch(`/api/v1/actions/${name}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": envelope.csrf_token }, body: JSON.stringify(body) });
-    if (!response.ok) { const result = await response.json().catch(() => ({})); throw new Error(result?.error?.detail || `Action rejected (${response.status})`); }
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result?.error?.detail || `Action rejected (${response.status})`);
+    }
     await refresh();
   };
   return { envelope, error, refresh, action };
 }
 
-function PerformanceChart({ measurements }: { measurements: Measurement[] }) {
+function HistoryChart({ measurements }: { measurements: Measurement[] }) {
   const host = useRef<HTMLDivElement>(null);
-  const ordered = useMemo(() => [...measurements].filter(item => item.status === "complete").reverse(), [measurements]);
+  const complete = useMemo(() => measurements.filter(item => item.status === "complete").slice().reverse(), [measurements]);
   useEffect(() => {
-    if (!host.current || ordered.length < 2) return;
-    const data: uPlot.AlignedData = [ordered.map(item => new Date(item.started_at).getTime() / 1000), ordered.map(item => item.download_bps / 1e6), ordered.map(item => item.upload_bps / 1e6)];
-    const plot = new uPlot({ width: Math.max(240, host.current.clientWidth), height: 220, cursor: { drag: { x: true, y: false } }, scales: { x: { time: true }, y: { range: (_u, min, max) => [0, Math.max(10, max * 1.15)] } }, axes: [{ stroke: "#94a3b8", grid: { stroke: "#172b46" } }, { stroke: "#94a3b8", grid: { stroke: "#172b46" }, label: "Mbps" }], series: [{}, { label: "Download", stroke: "#087cff", width: 2 }, { label: "Upload", stroke: "#08e889", width: 2 }] }, data, host.current);
-    const observer = new ResizeObserver(entries => plot.setSize({ width: Math.max(240, entries[0].contentRect.width), height: 220 })); observer.observe(host.current);
+    if (!host.current || complete.length < 2) return;
+    const data: uPlot.AlignedData = [complete.map(item => new Date(item.started_at).getTime() / 1000), complete.map(item => item.download_bps / 1e6), complete.map(item => item.upload_bps / 1e6)];
+    const plot = new uPlot({ width: Math.max(260, host.current.clientWidth), height: 230, cursor: { drag: { x: true, y: false } }, scales: { x: { time: true }, y: { range: (_u, _min, max) => [0, Math.max(10, max * 1.15)] } }, axes: [{ stroke: "#71869e", grid: { stroke: "#172b46" } }, { stroke: "#71869e", grid: { stroke: "#172b46" } }], series: [{}, { label: "Download", stroke: "#1687ff", width: 3 }, { label: "Upload", stroke: "#12df91", width: 3 }] }, data, host.current);
+    const observer = new ResizeObserver(entries => plot.setSize({ width: Math.max(260, entries[0].contentRect.width), height: 230 }));
+    observer.observe(host.current);
     return () => { observer.disconnect(); plot.destroy(); };
-  }, [ordered]);
-  if (ordered.length < 2) return <div class="empty">Run at least two complete tests to display the performance history.</div>;
-  return <div ref={host} class="chart" aria-label="Download and upload performance history chart" />;
+  }, [complete]);
+  if (complete.length < 2) return <div class="chart-empty"><span>⌁</span><strong>Your history will appear here</strong><small>Run two tests to see the trend.</small></div>;
+  return <div ref={host} class="chart" aria-label="Speed history chart" />;
 }
 
-type ConsentReview = { heading: string; intro: string; points: string[]; acknowledgement: string; confirmLabel: string };
-
-function ConsentCard({ scope, consent, title, children, review, grantDisabled = false, disabledReason = "", stateLabel = "", onChange }: { scope: string; consent: Consent; title: string; children: preact.ComponentChildren; review: ConsentReview; grantDisabled?: boolean; disabledReason?: string; stateLabel?: string; onChange: (granted: boolean) => Promise<void> }) {
-  const [busy, setBusy] = useState(false); const [message, setMessage] = useState(""); const [reviewing, setReviewing] = useState(false); const [acknowledged, setAcknowledged] = useState(false); const cancelRef = useRef<HTMLButtonElement>(null);
-  const closeReview = () => { if (!busy) { setReviewing(false); setAcknowledged(false); } };
+function MeasurementPermission({ firstRun, busy, error, onSave, onClose }: { firstRun: boolean; busy: boolean; error: string; onSave: (granted: boolean) => void; onClose: () => void }) {
+  const [checked, setChecked] = useState(false);
+  const firstButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    if (!reviewing) return;
-    cancelRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") closeReview(); };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [reviewing, busy]);
-  const change = async (granted: boolean) => {
-    setBusy(true); setMessage("");
-    try { await onChange(granted); if (granted) { setReviewing(false); setAcknowledged(false); } }
-    catch (cause) { setMessage(cause instanceof Error ? cause.message : "Unable to save consent"); }
-    finally { setBusy(false); }
-  };
-  const dialogTitle = `${scope}-consent-title`;
-  return <article class="consent-card"><div><p class="eyebrow">Independent consent</p><h3>{title}</h3></div><div class="consent-copy">{children}</div><div class="consent-actions"><span class={`pill ${consent.granted && stateLabel !== "Suspended" ? "ok" : "muted"}`}>{stateLabel || (consent.granted ? "Granted" : "Not granted")}</span><button class="button secondary" disabled={busy || (grantDisabled && !consent.granted)} onClick={() => consent.granted ? void change(false) : setReviewing(true)}>{consent.granted ? "Withdraw" : "Review and grant"}</button></div>{grantDisabled && <p class="muted-copy">{disabledReason}</p>}{message && <p class="error" role="alert">{message}</p>}
-    {reviewing && <div class="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) closeReview(); }}><section class="consent-dialog" role="dialog" aria-modal="true" aria-labelledby={dialogTitle}><p class="eyebrow">Explicit consent</p><h2 id={dialogTitle}>{review.heading}</h2><p>{review.intro}</p><ul>{review.points.map(point => <li key={point}>{point}</li>)}</ul><label class="acknowledgement"><input type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.currentTarget.checked)} /><span>{review.acknowledgement}</span></label><div class="dialog-actions"><button ref={cancelRef} class="button ghost" disabled={busy} onClick={closeReview}>Cancel</button><button class="button primary" disabled={busy || !acknowledged} onClick={() => void change(true)}>{busy ? "Saving…" : review.confirmLabel}</button></div></section></div>}
-  </article>;
+    firstButton.current?.focus();
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape" && !firstRun) onClose(); };
+    window.addEventListener("keydown", escape);
+    return () => window.removeEventListener("keydown", escape);
+  }, [firstRun, onClose]);
+  return <div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="permission-title">
+    <div class="modal-icon">↕</div>
+    <p class="eyebrow">One-time setup</p>
+    <h2 id="permission-title">Allow Internet speed tests?</h2>
+    <p class="modal-lead">Choose once. FiberPulse will remember your decision permanently on this Mac.</p>
+    <div class="permission-points">
+      <p><b>2 automatic tests per day</b><span>Never more than 4 automatic tests in 24 hours.</span></p>
+      <p><b>Tests use download and upload data</b><span>Automatic tests stop on metered or roaming networks.</span></p>
+      <p><b>M-Lab receives and publishes test data</b><span>This includes your public IP. FiberPulse cannot erase M-Lab history.</span></p>
+    </div>
+    <label class="check"><input type="checkbox" checked={checked} onChange={event => setChecked(event.currentTarget.checked)} /><span>I understand how the tests work and M-Lab’s data policy.</span></label>
+    {error && <p class="inline-error" role="alert">{error}</p>}
+    <div class="modal-actions"><button ref={firstButton} class="button quiet" disabled={busy} onClick={() => onSave(false)}>Not now</button><button class="button primary" disabled={busy || !checked} onClick={() => onSave(true)}>{busy ? "Saving…" : "Allow permanently"}</button></div>
+    <a class="policy-link" href="https://www.measurementlab.net/privacy/" target="_blank" rel="noreferrer">Read M-Lab privacy policy</a>
+  </section></div>;
+}
+
+function SharingPermission({ busy, error, onSave, onClose }: { busy: boolean; error: string; onSave: (granted: boolean) => void; onClose: () => void }) {
+  const [checked, setChecked] = useState(false);
+  return <div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="sharing-title">
+    <div class="modal-icon">♥</div><p class="eyebrow">Optional</p><h2 id="sharing-title">Help improve Internet data?</h2>
+    <p class="modal-lead">Share anonymous measurement results with FiberPulse. This is separate from speed testing.</p>
+    <div class="permission-points"><p><b>No account or contact details</b><span>No email, hostname, exact IP, SSID, GPS or local logs are stored.</span></p><p><b>You stay in control</b><span>Disable sharing anytime; the local queue is immediately cleared.</span></p></div>
+    <label class="check"><input type="checkbox" checked={checked} onChange={event => setChecked(event.currentTarget.checked)} /><span>I understand which minimal fields are shared.</span></label>
+    {error && <p class="inline-error" role="alert">{error}</p>}
+    <div class="modal-actions"><button class="button quiet" disabled={busy} onClick={onClose}>Cancel</button><button class="button primary" disabled={busy || !checked} onClick={() => onSave(true)}>Enable sharing</button></div>
+  </section></div>;
 }
 
 function App() {
-  const { envelope, error, refresh, action } = useStatus(); const [actionError, setActionError] = useState(""); const [exporting, setExporting] = useState("");
-  if (!envelope) return <main class="shell"><div class="loading"><span class="pulse" />{error || "Connecting to the local FiberPulse agent…"}</div></main>;
-  const status = envelope.data; const health = status.last_health || { state: "unknown", category: "unknown", network: {} as Network } as Health; const measurements = status.measurements || []; const latest = measurements[0]; const personalBaseline = status.baseline || { maturity: "insufficient", count: 0, days: 0, download_median_bps: 0, download_mad_bps: 0, upload_median_bps: 0, min_rtt_median_us: 0 }; const incidents = status.incidents || []; const reports = status.reports || [];
-  const providerLabel = status.provider.name === "development_fake" ? "Local simulation" : status.provider.name;
-  const connectivityState = status.connectivity_state || health.state || "unknown";
-  const connectionLabel = connectivityState === "internet_usable" ? "Internet usable" : connectivityState === "local_only" ? "Local link only" : connectivityState === "offline" ? "Offline" : connectivityState === "internet_degraded" ? "Internet degraded" : connectivityState === "unstable" ? "Unstable" : "Validation pending";
-  const schedulerLabel = status.paused ? "Paused" : !status.mlab_consent.granted ? "Consent required" : status.scheduler_state === "blocked_metered" ? "Metered network" : status.scheduler_state === "blocked_quota" ? "Quota reached" : status.scheduler_state === "deferred_busy" ? "Deferred" : status.scheduler_state === "running" ? "Testing" : "Active";
-  const schedulerWarning = status.paused || !status.mlab_consent.granted || ["blocked_metered", "blocked_quota", "deferred_busy", "disabled"].includes(status.scheduler_state);
-  const checkLabel = (configured: boolean, healthy: boolean) => !configured ? "Not configured" : healthy ? "Healthy" : "Unavailable";
-  const run = async (name: string, body: unknown = {}) => { setActionError(""); try { await action(name, body); } catch (cause) { setActionError(cause instanceof Error ? cause.message : "Action failed"); } };
-  const downloadReport = async (format: "pdf" | "csv") => {
-    setActionError(""); setExporting(format);
+  const { envelope, error, refresh, action } = useStatus();
+  const [actionError, setActionError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [permissionOpen, setPermissionOpen] = useState(false);
+  const [sharingOpen, setSharingOpen] = useState(false);
+  const [exporting, setExporting] = useState("");
+
+  if (!envelope) return <main class="loading"><img src={brandMark} alt="" /><span>{error || "Opening FiberPulse…"}</span></main>;
+
+  const status = envelope.data;
+  const health = status.last_health || {};
+  const network = health.network || {};
+  const measurements = status.measurements || [];
+  const latest = measurements[0];
+  const incidents = status.incidents || [];
+  const activeIncidents = incidents.filter(item => ["active", "suspected", "recovering"].includes(item.state));
+  const baseline = status.baseline || { maturity: "insufficient", count: 0, days: 0, download_median_bps: 0, upload_median_bps: 0, min_rtt_median_us: 0 };
+  const firstRun = !status.mlab_consent.policy_version;
+  const showPermission = firstRun || permissionOpen;
+  const connectionState = status.connectivity_state || health.state || "unknown";
+  const connectionGood = connectionState === "internet_usable";
+  const connectionDetected = connectionGood || Boolean(network.online);
+  const connectionLabel = connectionGood ? "Your Internet is working" : connectionState === "offline" ? "You are offline" : connectionState === "unstable" ? "Your Internet is unstable" : connectionState === "internet_degraded" ? "Internet performance is degraded" : network.online ? "Internet connection detected" : "Checking your Internet…";
+  const monitoringLabel = status.paused ? "Paused" : status.mlab_consent.granted ? "Active" : "Speed tests off";
+
+  const run = async (name: string, body: unknown = {}) => {
+    setActionError(""); setBusy(true);
+    try { await action(name, body); }
+    catch (cause) { setActionError(cause instanceof Error ? cause.message : "Action failed"); }
+    finally { setBusy(false); }
+  };
+  const saveMeasurementPermission = async (granted: boolean) => {
+    setActionError(""); setBusy(true);
+    try { await action("consent", { scope: "mlab", granted, language: "en" }); setPermissionOpen(false); }
+    catch (cause) { setActionError(cause instanceof Error ? cause.message : "Unable to save your choice"); }
+    finally { setBusy(false); }
+  };
+  const saveSharing = async (granted: boolean) => {
+    setActionError(""); setBusy(true);
+    try { await action("consent", { scope: "fiberpulse", granted, language: "en" }); setSharingOpen(false); }
+    catch (cause) { setActionError(cause instanceof Error ? cause.message : "Unable to save your choice"); }
+    finally { setBusy(false); }
+  };
+  const startTest = () => {
+    if (!status.mlab_consent.granted) { setPermissionOpen(true); return; }
+    void run("test");
+  };
+  const exportReport = async (format: "pdf" | "csv") => {
+    setExporting(format); setActionError("");
     try {
       const response = await fetch(`/api/v1/export/${format}`, { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": envelope.csrf_token } });
       if (!response.ok) throw new Error(`Report generation failed (${response.status})`);
-      const objectURL = URL.createObjectURL(await response.blob());
-      const link = document.createElement("a"); link.href = objectURL; link.download = `fiberpulse-report.${format}`; document.body.appendChild(link); link.click(); link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(objectURL), 1000);
-      await refresh();
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a"); link.href = url; link.download = `fiberpulse-report.${format}`; link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000); await refresh();
     } catch (cause) { setActionError(cause instanceof Error ? cause.message : "Report generation failed"); }
     finally { setExporting(""); }
   };
+
   return <main class="shell">
-    <header class="topbar"><a class="brand" href="#overview" aria-label="FiberPulse overview"><img src={brandMark} alt="" /><span class="wordmark"><strong><b>Fiber</b>Pulse</strong><small>Know your real Internet performance</small></span></a><nav aria-label="Dashboard sections"><a href="#overview">Overview</a><a href="#history">History</a><a href="#network">Network</a><a href="#incidents">Insights</a><a href="#reports">Reports</a><a href="#privacy">Privacy</a></nav><div class="top-actions"><span class={`live ${health.network?.online ? "online" : "offline"}`}><i />{health.network?.online ? "Online" : "Offline"}</span><button class="button ghost quit" onClick={() => void run("quit")}>Quit completely</button></div></header>
-    {(error || actionError || status.last_error) && <div class="notice error" role="alert">{actionError || error || status.last_error}</div>}
-    <section class="hero" id="overview">
-      <div class="hero-copy"><p class="eyebrow">Local-first network evidence</p><h1>Know Your Real Internet <span>Performance.</span></h1><p>FiberPulse documents the performance you actually observe over time. No inflated promises, no claim of guaranteed line capacity, and no account required.</p><div class="hero-actions"><button class="button primary" disabled={!status.mlab_consent.granted || !status.provider.enabled || status.test_state !== "idle"} onClick={() => void run("test")}>{status.test_state === "idle" ? "Run manual test" : `Test: ${status.test_state}`}</button><button class="button secondary" onClick={() => void run("pause", { paused: !status.paused })}>{status.paused ? "Resume automatic tests" : "Pause automatic tests"}</button></div><div class="trust-row"><span><i>✓</i><b>Local first</b><small>History stays on this device</small></span><span><i>⌁</i><b>Privacy first</b><small>Sharing is a separate opt-in</small></span><span><i>↗</i><b>Transparent</b><small>Versioned methodology</small></span></div></div>
-      <article class="measurement-console" aria-label="Current FiberPulse measurement dashboard"><div class="console-head"><div class="console-provider"><img src={brandMark} alt="" /><span><small>Measurement provider</small><strong>{providerLabel}</strong></span></div><div class={`connection-state ${connectivityState === "internet_usable" ? "connected" : "disconnected"}`}><i />{connectionLabel}</div></div><section class="metrics" aria-label="Latest measurement"><article><span>Download</span><strong>{latest ? fmtMbps(latest.download_bps) : "—"}</strong><small>Measured performance</small></article><article><span>Upload</span><strong>{latest ? fmtMbps(latest.upload_bps) : "—"}</strong><small>Measured performance</small></article><article><span>Minimum RTT</span><strong>{latest ? fmtRTT(latest.min_rtt_us) : "—"}</strong><small>Toward the test server</small></article></section><div class="console-chart" id="history"><div class="panel-head"><div><p class="eyebrow">13-month local history</p><h2>Performance trend</h2></div><button class="button compact" disabled={!!exporting} onClick={() => void downloadReport("csv")}>{exporting === "csv" ? "Generating…" : "Export CSV"}</button></div><PerformanceChart measurements={measurements} /></div><div class="console-foot"><span><small>Context</small><b>{health.network?.connection_type || "unknown"}</b></span><span><small>Confidence</small><b class={`confidence ${latest?.confidence_level || "low"}`}>{latest ? `${latest.confidence_score}/100 · ${latest.confidence_level}` : "Awaiting test"}</b></span><span><small>Tests stored</small><b>{measurements.length}</b></span></div></article>
+    <header class="topbar"><div class="brand"><img src={brandMark} alt="" /><span><b>Fiber</b>Pulse</span></div><div class="top-actions"><span class={`online-chip ${network.online ? "online" : ""}`}><i />{network.online ? "Online" : "Offline"}</span><button class="icon-button" aria-label="Open settings" onClick={() => setSettingsOpen(true)}>⚙</button><button class="button quit" onClick={() => void run("quit")}>Quit</button></div></header>
+    {(error || actionError || status.last_error) && <div class="notice" role="alert">{actionError || error || status.last_error}</div>}
+
+    <section class="status-hero">
+      <div class={`status-symbol ${connectionDetected ? "good" : "checking"}`}>{connectionDetected ? "✓" : "⌁"}</div>
+      <p class="eyebrow">Live connection status</p><h1>{connectionLabel}</h1>
+      <p class="hero-subtitle">{latest ? `Last speed test: ${date(latest.started_at)}` : "Run your first test to measure the real performance."}</p>
+      <div class="speed-grid" aria-label="Latest speed test">
+        <article><span class="speed-icon down">↓</span><div><small>DOWNLOAD</small><strong>{mbps(latest?.download_bps)}</strong><em>Mbps</em></div></article>
+        <article><span class="speed-icon up">↑</span><div><small>UPLOAD</small><strong>{mbps(latest?.upload_bps)}</strong><em>Mbps</em></div></article>
+        <article><span class="speed-icon ping">●</span><div><small>LATENCY</small><strong>{latency(latest?.min_rtt_us)}</strong><em>ms</em></div></article>
+      </div>
+      <button class="test-button" disabled={busy || !status.provider.enabled || status.test_state !== "idle"} onClick={startTest}><span>▶</span>{status.test_state === "idle" ? "Run speed test" : `Test ${words(status.test_state)}…`}</button>
+      <p class="test-note">Measures download, upload and latency. Results stay on this device.</p>
     </section>
-    <section class="insight-grid" id="network">
-      <article class="panel"><div class="panel-head"><div><p class="eyebrow">Network status</p><h2>Connection context</h2></div><span class={`pill ${connectivityState === "internet_usable" ? "ok" : "warn"}`}>{connectionLabel}</span></div><dl class="facts"><div><dt>Connection</dt><dd>{health.network?.connection_type || "unknown"}</dd></div><div><dt>DNS check</dt><dd>{checkLabel(health.dns_configured, health.dns_ok)}</dd></div><div><dt>Probe check</dt><dd>{checkLabel(health.probe_configured, health.probe_ok)}</dd></div><div><dt>VPN</dt><dd>{health.network?.vpn_suspected ? "Suspected" : "No local signal"}</dd></div><div><dt>Proxy</dt><dd>{health.network?.proxy_suspected ? "Suspected" : "No local signal"}</dd></div><div><dt>Metered</dt><dd>{health.network?.metered ? "Yes — tests blocked" : "No local signal"}</dd></div></dl></article>
-      <article class="panel"><div class="panel-head"><div><p class="eyebrow">Automatic monitoring</p><h2>Randomized, never excessive</h2></div><span class={`pill ${schedulerWarning ? "warn" : "ok"}`}>{schedulerLabel}</span></div><p class="schedule-label">Next eligible automatic test</p><p class="schedule-time">{fmtDate(status.next_automatic_test)}</p><div class="limit-bar"><span style={{ width: "50%" }} /></div><p class="muted-copy">Default: two randomized tests per day. Hard limit: four automatic and eight total starts in every rolling 24-hour window. Metered and roaming networks are blocked.</p></article>
-      <article class="panel evidence-card"><div class="panel-head"><div><p class="eyebrow">Transparent result</p><h2>Confidence and limitations</h2></div><span class={`score-ring ${latest?.confidence_level || "empty"}`}>{latest ? latest.confidence_score : "—"}<small>{latest?.confidence_level || "No test"}</small></span></div><p>{latest ? "This rule-based score explains whether the result is suitable for local interpretation. It is not a probability." : "Run a complete measurement to calculate a confidence score and its reason codes."}</p><dl class="mini-facts"><div><dt>Provider</dt><dd>{providerLabel}</dd></div><div><dt>M-Lab consent</dt><dd>{status.mlab_consent.granted ? "Granted" : "Not granted"}</dd></div><div><dt>Public eligible</dt><dd>{latest?.public_eligible ? "Yes" : "No"}</dd></div></dl></article>
+
+    <section class="quick-grid">
+      <article class="quick-card"><span class={`quick-icon ${status.paused ? "amber" : "green"}`}>{status.paused ? "Ⅱ" : "✓"}</span><div><small>AUTOMATIC MONITORING</small><h2>{monitoringLabel}</h2><p>{status.paused ? "Automatic tests are paused." : status.mlab_consent.granted ? `Next check: ${date(status.next_automatic_test)}` : "Enable it once in Settings."}</p></div><button class="mini-button" onClick={() => void run("pause", { paused: !status.paused })}>{status.paused ? "Resume" : "Pause"}</button></article>
+      <article class="quick-card"><span class={`quick-icon ${activeIncidents.length ? "amber" : "green"}`}>{activeIncidents.length ? "!" : "✓"}</span><div><small>ACTIVE ISSUES</small><h2>{activeIncidents.length ? `${activeIncidents.length} detected` : "No problem detected"}</h2><p>{activeIncidents.length ? `Latest: ${words(activeIncidents[0].category)}` : "Your recent checks look normal."}</p></div></article>
     </section>
-    <section class="local-intelligence" id="incidents">
-      <article class="panel baseline-panel"><div class="panel-head"><div><p class="eyebrow">Personal baseline</p><h2>Median and variability</h2></div><span class={`pill ${personalBaseline.maturity === "insufficient" ? "muted" : "ok"}`}>{personalBaseline.maturity.replaceAll("_", " ")}</span></div><p class="muted-copy">The baseline uses only complete, high-confidence local measurements. Median and MAD resist isolated spikes better than a simple average.</p><dl class="baseline-facts"><div><dt>Qualified tests</dt><dd>{personalBaseline.count} across {personalBaseline.days} day{personalBaseline.days === 1 ? "" : "s"}</dd></div><div><dt>Median download</dt><dd>{personalBaseline.count ? fmtMbps(personalBaseline.download_median_bps) : "Awaiting data"}</dd></div><div><dt>Download MAD</dt><dd>{personalBaseline.count ? fmtMbps(personalBaseline.download_mad_bps) : "Awaiting data"}</dd></div><div><dt>Median upload</dt><dd>{personalBaseline.count ? fmtMbps(personalBaseline.upload_median_bps) : "Awaiting data"}</dd></div><div><dt>Median minimum RTT</dt><dd>{personalBaseline.count ? fmtRTT(personalBaseline.min_rtt_median_us) : "Awaiting data"}</dd></div></dl></article>
-      <article class="panel incidents-panel"><div class="panel-head"><div><p class="eyebrow">Incident history</p><h2>Observed degradations</h2></div><span class={`pill ${incidents.some(item => item.state === "active") ? "warn" : "muted"}`}>{incidents.length} recorded</span></div>{incidents.length === 0 ? <p class="incident-empty">No incident has met the confirmation rules. A single abnormal observation is never presented as a confirmed outage.</p> : <ol class="incident-list">{incidents.slice(0, 6).map(item => <li class="incident-row" key={item.id}><div><strong>{item.category.replaceAll("_", " ")}</strong><span class={`pill ${item.state === "active" ? "warn" : item.state === "resolved" ? "ok" : "muted"}`}>{item.state}</span><small>Suspected {fmtDate(item.suspected_at)}{item.resolved_at ? ` · Resolved ${fmtDate(item.resolved_at)}` : ""}</small></div>{item.state === "active" && <button class="button compact" onClick={() => void run("incident-dismiss", { id: item.id })}>Dismiss locally</button>}</li>)}</ol>}</article>
-    </section>
-    <section class="consents" id="privacy"><div class="section-head"><p class="eyebrow">Privacy controls</p><h2>Your data, your choice.</h2><p>M-Lab testing and minimal FiberPulse sharing are separate decisions. Neither is preselected, and both can be withdrawn locally.</p></div><div class="consent-grid">
-      <ConsentCard scope="mlab" consent={status.mlab_consent} title="M-Lab measurements" review={{ heading: "Review M-Lab measurement consent", intro: "No NDT7 test starts until you confirm this separate consent.", points: ["NDT7 generates significant synthetic download and upload traffic directly between this device and M-Lab. The default is two randomized automatic tests per day; hard limits are four automatic and eight total starts in any rolling 24 hours.", "Traffic volume varies with line speed and test duration. A plan-based estimate must be shown when an Internet plan is configured; automatic tests remain blocked on metered or roaming networks.", "M-Lab receives the public IP and measurement result, publishes measurement data under its policy, and may retain it indefinitely. FiberPulse cannot delete M-Lab’s historical data.", "You can stop future FiberPulse-initiated tests at any time by withdrawing this consent."], acknowledgement: "I understand the traffic, publication, retention and erasure limitations described above.", confirmLabel: "Grant M-Lab consent" }} onChange={granted => action("consent", { scope: "mlab", granted, language: "en" })}><p>NDT7 sends synthetic traffic directly to M-Lab. M-Lab publishes the public IP and measurement data and may retain them indefinitely. FiberPulse cannot erase M-Lab’s historical public data.</p><p><a href="https://www.measurementlab.net/privacy/" target="_blank" rel="noreferrer">Read M-Lab privacy policy</a></p></ConsentCard>
-      <ConsentCard scope="fiberpulse" consent={status.sharing_consent} stateLabel={status.sharing_state === "suspended" ? "Suspended" : ""} title="Minimal FiberPulse sharing" grantDisabled={!status.sharing_available} disabledReason="Sharing transport is intentionally disabled in this development build. No FiberPulse cloud request will be sent." review={{ heading: "Review FiberPulse sharing consent", intro: "This choice is independent from M-Lab testing and is disabled by default.", points: ["Shared fields are limited to rounded time, declared ISP and plan, coarse optional location, measured download/upload/RTT, coarse connection context, confidence reasons and version identifiers.", "FiberPulse does not accept exact IP addresses as stored measurement data, SSID, BSSID, hostname, hardware identifiers, accounts, email, GPS, local interface details or local logs.", "The source IP is processed transiently for ASN and abuse prevention. Accepted pseudonymous measurements are retained for 13 months.", "Withdrawal stops new sharing immediately, purges the local queue and requests central deletion when the signed production transport is configured; M-Lab data is outside FiberPulse’s control."], acknowledgement: "I understand exactly what is shared, why it is processed, and how withdrawal works.", confirmLabel: "Enable minimal sharing" }} onChange={granted => action("consent", { scope: "fiberpulse", granted, language: "en" })}><p>Share only the versioned measurement fields, coarse network context and confidence reasons. No exact IP, SSID, BSSID, hostname, account, email, GPS or local logs are stored by FiberPulse.</p><p>Queued events on this machine: {status.share_queue_count}</p></ConsentCard>
-    </div></section>
-    <section class="panel table-panel" id="reports"><div class="panel-head"><div><p class="eyebrow">Detailed reports</p><h2>Recent measurements</h2></div><button class="button secondary" disabled={!!exporting} onClick={() => void downloadReport("pdf")}>{exporting === "pdf" ? "Generating…" : "Generate factual PDF"}</button></div><div class="table-scroll"><table><thead><tr><th>Date</th><th>Download</th><th>Upload</th><th>Min RTT</th><th>Context</th><th>Confidence</th></tr></thead><tbody>{measurements.length === 0 ? <tr><td colSpan={6} class="empty-cell">No measurements yet. Consent and a valid unmetered network are required.</td></tr> : measurements.map(item => <tr key={item.id}><td>{fmtDate(item.started_at)}</td><td>{fmtMbps(item.download_bps)}</td><td>{fmtMbps(item.upload_bps)}</td><td>{fmtRTT(item.min_rtt_us)}</td><td>{item.status}</td><td><span class={`pill ${item.public_eligible ? "ok" : "muted"}`}>{item.confidence_score} · {item.confidence_level}</span></td></tr>)}</tbody></table></div><div class="report-history"><div class="panel-head"><div><p class="eyebrow">Local export history</p><h3>Generated exports</h3></div><span class="pill muted">{reports.filter(item => item.state !== "deleted").length} retained</span></div><p class="muted-copy">This history contains metadata only. Downloaded PDF and CSV files remain in the folder selected by your browser.</p>{reports.length === 0 ? <p class="incident-empty">No report has been generated on this device.</p> : <ol class="report-list">{reports.slice(0, 8).map(item => <li key={item.id}><div><strong>{item.format.toUpperCase()} · {item.state}</strong><small>{fmtDate(item.created_at)}{item.byte_count ? ` · ${(item.byte_count / 1024).toFixed(1)} KiB` : ""}{item.error_code ? ` · ${item.error_code}` : ""}</small></div>{["ready", "exported", "failed"].includes(item.state) && <button class="button compact" onClick={() => void run("report-delete", { id: item.id })}>Remove entry</button>}</li>)}</ol>}</div></section>
-    <footer><span class="footer-brand"><img src={brandMark} alt="" />FiberPulse {status.version}</span><span>All history shown here is stored locally.</span></footer>
+
+    <section class="history-card"><div class="section-heading"><div><p class="eyebrow">Your speed over time</p><h2>Simple performance history</h2></div><span>{measurements.length} test{measurements.length === 1 ? "" : "s"}</span></div><HistoryChart measurements={measurements} /></section>
+
+    <details class="details-card"><summary><span><b>Details and reports</b><small>Network context, confidence, incidents and exports</small></span><i>⌄</i></summary><div class="details-content">
+      <div class="detail-grid"><article><h3>Network</h3><dl><div><dt>Connection</dt><dd>{words(network.connection_type)}</dd></div><div><dt>VPN / proxy</dt><dd>{network.vpn_suspected || network.proxy_suspected ? "Suspected" : "Not detected"}</dd></div><div><dt>Metered</dt><dd>{network.metered ? "Yes" : "No"}</dd></div></dl></article><article><h3>Latest result</h3><dl><div><dt>Confidence</dt><dd>{latest ? `${latest.confidence_score}/100 · ${words(latest.confidence_level)}` : "No test"}</dd></div><div><dt>Public eligible</dt><dd>{latest?.public_eligible ? "Yes" : "No"}</dd></div><div><dt>Provider</dt><dd>{status.provider.name === "development_fake" ? "Local simulation" : status.provider.name}</dd></div></dl></article><article><h3>Personal baseline</h3><dl><div><dt>Qualified tests</dt><dd>{baseline.count}</dd></div><div><dt>Median download</dt><dd>{baseline.count ? `${mbps(baseline.download_median_bps)} Mbps` : "Collecting data"}</dd></div><div><dt>Maturity</dt><dd>{words(baseline.maturity)}</dd></div></dl></article></div>
+      <div class="report-actions"><button class="button secondary" disabled={!!exporting} onClick={() => void exportReport("pdf")}>{exporting === "pdf" ? "Creating…" : "Download PDF report"}</button><button class="button secondary" disabled={!!exporting} onClick={() => void exportReport("csv")}>{exporting === "csv" ? "Creating…" : "Download CSV data"}</button></div>
+    </div></details>
+
+    <footer><span>FiberPulse {status.version}</span><span>Private by default · Data stored locally</span></footer>
+
+    {settingsOpen && <div class="modal-backdrop"><section class="modal settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><button class="modal-close" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button><p class="eyebrow">Settings</p><h2 id="settings-title">Simple controls</h2><div class="setting-row"><div><b>Internet speed tests</b><span>{status.mlab_consent.granted ? "Allowed permanently" : "Disabled"}</span></div>{status.mlab_consent.granted ? <button class="mini-button danger" onClick={() => void saveMeasurementPermission(false)}>Disable</button> : <button class="mini-button" onClick={() => { setSettingsOpen(false); setPermissionOpen(true); }}>Enable</button>}</div><div class="setting-row"><div><b>Automatic monitoring</b><span>{status.paused ? "Paused" : "Running"}</span></div><button class="mini-button" onClick={() => void run("pause", { paused: !status.paused })}>{status.paused ? "Resume" : "Pause"}</button></div><div class="setting-row"><div><b>Anonymous sharing</b><span>{status.sharing_consent.granted ? "Enabled" : status.sharing_available ? "Optional and disabled" : "Unavailable in this build"}</span></div>{status.sharing_consent.granted ? <button class="mini-button danger" onClick={() => void saveSharing(false)}>Disable</button> : <button class="mini-button" disabled={!status.sharing_available} onClick={() => { setSettingsOpen(false); setSharingOpen(true); }}>Enable</button>}</div><p class="settings-note">Your choices are saved on this device. FiberPulse will not ask again automatically.</p></section></div>}
+    {showPermission && <MeasurementPermission firstRun={firstRun} busy={busy} error={actionError} onSave={granted => void saveMeasurementPermission(granted)} onClose={() => setPermissionOpen(false)} />}
+    {sharingOpen && <SharingPermission busy={busy} error={actionError} onSave={granted => void saveSharing(granted)} onClose={() => setSharingOpen(false)} />}
   </main>;
 }
 
