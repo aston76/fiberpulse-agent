@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -428,18 +427,6 @@ func saveState(path string, state State) error {
 	if err := os.Rename(temporary, path); err != nil {
 		_ = os.Remove(temporary)
 		return err
-	}
-	return nil
-}
-
-func platformVerificationOutput(command *exec.Cmd) error {
-	output, err := command.CombinedOutput()
-	if err != nil {
-		message := strings.TrimSpace(string(output))
-		if message == "" {
-			message = err.Error()
-		}
-		return errors.New(message)
 	}
 	return nil
 }
