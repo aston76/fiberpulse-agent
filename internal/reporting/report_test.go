@@ -84,3 +84,12 @@ func TestMedianMetrics(t *testing.T) {
 		t.Fatalf("unexpected medians: %.0f %.0f %.0f", download, upload, latency)
 	}
 }
+
+func TestReportableResultsAreReverseChronological(t *testing.T) {
+	earlier := measurement.Result{Provider: measurement.ProviderMLabNDT7, StartedAt: time.Date(2026, 8, 29, 1, 0, 0, 0, time.UTC)}
+	later := measurement.Result{Provider: measurement.ProviderMLabNDT7, StartedAt: earlier.StartedAt.Add(time.Hour)}
+	ordered := reportableResults([]measurement.Result{earlier, later})
+	if len(ordered) != 2 || !ordered[0].StartedAt.Equal(later.StartedAt) {
+		t.Fatalf("results not reverse chronological: %+v", ordered)
+	}
+}

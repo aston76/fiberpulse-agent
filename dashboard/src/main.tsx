@@ -16,7 +16,13 @@ type PlanVerdict = { level: "on_par" | "below_plan" | "well_below_plan"; downloa
 type PlanState = { offer: PlanOffer; verdict?: PlanVerdict };
 type PlanSelection = { offer_id: string; custom?: Pick<PlanOffer, "country_code" | "country_name" | "isp" | "name" | "download_mbps" | "upload_mbps"> };
 type TestProgress = { phase: string; bytes: number; elapsed_us: number; estimated_bps: number };
-type Status = { version: string; test_state: string; scheduler_state: string; connectivity_state: string; paused: boolean; next_automatic_test?: string; provider: { name: string; enabled: boolean }; mlab_consent: Consent; sharing_consent: Consent; sharing_state: string; sharing_available: boolean; last_health?: Health; measurements?: Measurement[]; share_queue_count: number; baseline?: Baseline; plan?: PlanState | null; test_progress?: TestProgress; plan_catalog?: PlanOffer[]; incidents?: Incident[]; last_error?: string };
+type SubscriberProfile = { full_name: string; account_number: string; service_address: string; contact_email: string; contact_phone: string; provider_modem: string; provider_router: string; additional_router: boolean; additional_router_model: string; mesh_system: boolean; mesh_model: string; test_connection: string; network_layout: string; typical_device_count: string; notes: string; support_email_override: string; support_phone_override: string };
+type SupportContact = { isp: string; email?: string; phone?: string; support_url?: string; source_url?: string; verified_at?: string; note?: string };
+type ComplaintAssessment = { target_tests: number; qualified_tests: number; tests_remaining: number; target_days: number; observed_days: number; days_remaining: number; wired_tests: number; wifi_tests: number; median_download_mbps: number; median_upload_mbps: number; median_latency_ms: number; advertised_download_mbps: number; download_percent: number; evidence_ready: boolean; profile_complete: boolean; underperforming: boolean; complaint_ready: boolean; status: string; reasons?: string[] };
+type ComplaintDraft = { to?: string; subject: string; body: string; call_script: string; support_url?: string; ready: boolean; warning?: string };
+type ComplaintState = { profile: SubscriberProfile; contact: SupportContact; assessment: ComplaintAssessment; draft: ComplaintDraft };
+type SponsorOffer = { campaign_id: string; label: string; headline: string; body: string; cta: string; url: string };
+type Status = { version: string; test_state: string; scheduler_state: string; connectivity_state: string; paused: boolean; next_automatic_test?: string; provider: { name: string; enabled: boolean }; mlab_consent: Consent; sharing_consent: Consent; sharing_state: string; sharing_available: boolean; last_health?: Health; measurements?: Measurement[]; share_queue_count: number; baseline?: Baseline; plan?: PlanState | null; complaint: ComplaintState; sponsor?: SponsorOffer; test_progress?: TestProgress; plan_catalog?: PlanOffer[]; incidents?: Incident[]; last_error?: string };
 type Envelope = { csrf_token: string; data: Status };
 
 const mbps = (value = 0) => value > 0 ? (value / 1_000_000).toFixed(value >= 100_000_000 ? 0 : 1) : "—";
@@ -84,7 +90,7 @@ function MeasurementPermission({ firstRun, busy, error, onSave, onClose }: { fir
     <h2 id="permission-title">Allow Internet speed tests?</h2>
     <p class="modal-lead">Choose once. FiberPulse will remember your decision permanently on this Mac.</p>
     <div class="permission-points">
-      <p><b>2 automatic tests per day</b><span>Never more than 4 automatic tests in 24 hours.</span></p>
+	      <p><b>3 automatic tests per day</b><span>Never more than 4 automatic tests in 24 hours.</span></p>
       <p><b>Tests use download and upload data</b><span>Automatic tests stop on metered or roaming networks.</span></p>
       <p><b>M-Lab receives and publishes test data</b><span>This includes your public IP. FiberPulse cannot erase M-Lab history.</span></p>
     </div>
@@ -277,6 +283,50 @@ function PlanModal({ catalog, current, busy, onSave, onClose }: { catalog: PlanO
   </section></div>;
 }
 
+function ProfileModal({ profile, busy, error, onSave, onClose }: { profile: SubscriberProfile; busy: boolean; error: string; onSave: (profile: SubscriberProfile) => void; onClose: () => void }) {
+  const [form, setForm] = useState(profile);
+  const set = (key: keyof SubscriberProfile, value: string | boolean) => setForm(current => ({ ...current, [key]: value }));
+  const valid = Boolean(form.full_name.trim() && form.account_number.trim() && form.service_address.trim());
+  return <div class="modal-backdrop"><section class="modal profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
+    <button class="modal-close" aria-label="Close subscriber profile" onClick={onClose}>×</button>
+    <p class="eyebrow">Provider-ready dossier</p><h2 id="profile-title">Subscriber and installation profile</h2>
+    <p class="modal-text">These details are saved only in your local FiberPulse database. They are inserted into your complaint files, never into technical logs or anonymous sharing.</p>
+    <div class="profile-grid">
+      <label class="plan-field"><span>Account holder *</span><input maxlength={120} value={form.full_name} onInput={e => set("full_name", e.currentTarget.value)} /></label>
+      <label class="plan-field"><span>Provider account number *</span><input maxlength={80} value={form.account_number} onInput={e => set("account_number", e.currentTarget.value)} /></label>
+      <label class="plan-field wide"><span>Service address *</span><input maxlength={300} value={form.service_address} onInput={e => set("service_address", e.currentTarget.value)} /></label>
+      <label class="plan-field"><span>Your email</span><input type="email" maxlength={160} value={form.contact_email} onInput={e => set("contact_email", e.currentTarget.value)} /></label>
+      <label class="plan-field"><span>Your phone</span><input maxlength={60} value={form.contact_phone} onInput={e => set("contact_phone", e.currentTarget.value)} /></label>
+      <label class="plan-field"><span>Provider modem / ONT</span><input maxlength={120} value={form.provider_modem} onInput={e => set("provider_modem", e.currentTarget.value)} placeholder="Brand and model" /></label>
+      <label class="plan-field"><span>Provider router</span><input maxlength={120} value={form.provider_router} onInput={e => set("provider_router", e.currentTarget.value)} placeholder="Brand and model" /></label>
+      <label class="plan-field"><span>Main test connection</span><select value={form.test_connection} onChange={e => set("test_connection", e.currentTarget.value)}><option value="">Not specified</option><option value="ethernet">Ethernet cable</option><option value="wifi">Wi-Fi</option><option value="mixed">Mixed</option></select></label>
+      <label class="plan-field"><span>Network layout</span><select value={form.network_layout} onChange={e => set("network_layout", e.currentTarget.value)}><option value="">Not specified</option><option value="provider_router_direct">Provider router only</option><option value="provider_router_plus_own">Provider router + own router</option><option value="bridge_own_router">Provider modem in bridge + own router</option><option value="mesh">Mesh network</option><option value="other">Other</option></select></label>
+      <label class="check compact"><input type="checkbox" checked={form.additional_router} onChange={e => set("additional_router", e.currentTarget.checked)} /><span>I use an additional router</span></label>
+      <label class="plan-field"><span>Additional router model</span><input disabled={!form.additional_router} maxlength={120} value={form.additional_router_model} onInput={e => set("additional_router_model", e.currentTarget.value)} /></label>
+      <label class="check compact"><input type="checkbox" checked={form.mesh_system} onChange={e => set("mesh_system", e.currentTarget.checked)} /><span>I use a mesh system</span></label>
+      <label class="plan-field"><span>Mesh model</span><input disabled={!form.mesh_system} maxlength={120} value={form.mesh_model} onInput={e => set("mesh_model", e.currentTarget.value)} /></label>
+      <label class="plan-field"><span>Typical connected devices</span><input maxlength={40} value={form.typical_device_count} onInput={e => set("typical_device_count", e.currentTarget.value)} placeholder="e.g. 8 to 12" /></label>
+      <label class="plan-field"><span>Provider support email override</span><input type="email" maxlength={160} value={form.support_email_override} onInput={e => set("support_email_override", e.currentTarget.value)} placeholder="Only if shown on your bill" /></label>
+      <label class="plan-field"><span>Provider support phone override</span><input maxlength={60} value={form.support_phone_override} onInput={e => set("support_phone_override", e.currentTarget.value)} placeholder="Only if shown on your bill" /></label>
+      <label class="plan-field wide"><span>Useful technical notes</span><textarea maxlength={800} rows={4} value={form.notes} onInput={e => set("notes", e.currentTarget.value)} placeholder="Room, cabling, recurring hours, LEDs, recent technician visits…" /></label>
+    </div>
+    {error && <p class="inline-error" role="alert">{error}</p>}
+    <div class="modal-actions"><button class="button quiet" disabled={busy} onClick={onClose}>Cancel</button><button class="button primary" disabled={busy || !valid} onClick={() => onSave(form)}>{busy ? "Saving…" : "Save local profile"}</button></div>
+  </section></div>;
+}
+
+function ComplaintModal({ complaint, onClose, onCopy }: { complaint: ComplaintState; onClose: () => void; onCopy: (value: string, label: string) => void }) {
+  return <div class="modal-backdrop"><section class="modal complaint-modal" role="dialog" aria-modal="true" aria-labelledby="complaint-title">
+    <button class="modal-close" aria-label="Close complaint preview" onClick={onClose}>×</button>
+    <p class="eyebrow">Ready to review</p><h2 id="complaint-title">Provider complaint draft</h2>
+    {complaint.draft.warning && <p class="complaint-warning">{complaint.draft.warning}</p>}
+	    <label class="draft-field"><span>Recipient</span><input readOnly value={complaint.draft.to || "Use the official portal or add the support email from your bill"} /></label>
+	    <label class="draft-field"><span>Subject</span><input readOnly value={complaint.draft.subject} /></label>
+	    <label class="draft-field"><span>Email</span><textarea readOnly rows={15} value={complaint.draft.body} /></label>
+    <div class="draft-actions"><button class="button secondary" onClick={() => onCopy(complaint.draft.subject + "\n\n" + complaint.draft.body, "Email copied")}>Copy email</button><button class="button secondary" onClick={() => onCopy(complaint.draft.call_script, "Call script copied")}>Copy call script</button></div>
+  </section></div>;
+}
+
 function App() {
   const { envelope, error, refresh, action } = useStatus();
   const [actionError, setActionError] = useState("");
@@ -285,6 +335,9 @@ function App() {
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [sharingOpen, setSharingOpen] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
+	const [profileOpen, setProfileOpen] = useState(false);
+	const [complaintOpen, setComplaintOpen] = useState(false);
+	const [copyNotice, setCopyNotice] = useState("");
   const [testPreflight, setTestPreflight] = useState<"vpn" | "wifi" | null>(null);
   const [exporting, setExporting] = useState("");
 
@@ -320,6 +373,8 @@ function App() {
   const networkTone = network.vpn_suspected || network.proxy_suspected ? "danger" : network.online ? "good" : "muted";
   const confidenceTone = !latest ? "muted" : latest.confidence_score >= 80 ? "good" : latest.confidence_score >= 60 ? "warning" : "danger";
   const confidenceLabel = latest ? `${latest.confidence_score}/100` : "No test";
+	const complaint = status.complaint;
+	const assessment = complaint.assessment;
 
   const run = async (name: string, body: unknown = {}) => {
     setActionError(""); setBusy(true);
@@ -352,21 +407,39 @@ function App() {
     catch (cause) { setActionError(cause instanceof Error ? cause.message : "Unable to save your plan"); }
     finally { setBusy(false); }
   };
-  const exportReport = async (format: "pdf" | "csv") => {
+	const saveProfile = async (profile: SubscriberProfile) => {
+		setActionError(""); setBusy(true);
+		try { await action("profile", profile); setProfileOpen(false); }
+		catch (cause) { setActionError(cause instanceof Error ? cause.message : "Unable to save your profile"); }
+		finally { setBusy(false); }
+	};
+	const copyText = async (value: string, label: string) => {
+		try {
+			await navigator.clipboard.writeText(value);
+			setCopyNotice(label); window.setTimeout(() => setCopyNotice(""), 2400);
+		} catch { setActionError("Clipboard access is unavailable. Select and copy the text from the preview."); }
+	};
+  const exportReport = async (format: "pdf" | "csv" | "complaint-pdf" | "complaint-eml") => {
     setExporting(format); setActionError("");
     try {
       const response = await fetch(`/api/v1/export/${format}`, { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": envelope.csrf_token } });
-      if (!response.ok) throw new Error(`Report generation failed (${response.status})`);
-      const url = URL.createObjectURL(await response.blob());
-      const link = document.createElement("a"); link.href = url; link.download = `fiberpulse-report.${format}`; link.click();
+	      if (!response.ok) throw new Error(format.startsWith("complaint") ? `Complaint package is not ready (${response.status})` : `Report generation failed (${response.status})`);
+	      const url = URL.createObjectURL(await response.blob());
+	      const filenames: Record<string, string> = { pdf: "fiberpulse-report.pdf", csv: "fiberpulse-report.csv", "complaint-pdf": "fiberpulse-complaint-report.pdf", "complaint-eml": "fiberpulse-complaint-email.eml" };
+	      const link = document.createElement("a"); link.href = url; link.download = filenames[format]; link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000); await refresh();
     } catch (cause) { setActionError(cause instanceof Error ? cause.message : "Report generation failed"); }
-    finally { setExporting(""); }
-  };
+	    finally { setExporting(""); }
+	  };
+	const openEmail = () => {
+		if (!assessment.complaint_ready || !complaint.draft.to) return;
+		window.location.href = `mailto:${encodeURIComponent(complaint.draft.to)}?subject=${encodeURIComponent(complaint.draft.subject)}&body=${encodeURIComponent(complaint.draft.body)}`;
+	};
 
   return <main class="shell">
     <header class="topbar"><div class="brand"><img src={brandMark} alt="" /><span><b>Fiber</b>Pulse</span></div><div class="top-actions"><span class={`online-chip ${network.online ? "online" : ""}`}><i />{network.online ? "Online" : "Offline"}</span><button class="icon-button" aria-label="Open settings" onClick={() => setSettingsOpen(true)}>⚙</button><button class="button quit" onClick={() => void run("quit")}>Quit</button></div></header>
-    {(error || actionError || status.last_error) && <div class="notice" role="alert">{actionError || error || status.last_error}</div>}
+	    {(error || actionError || status.last_error) && <div class="notice" role="alert">{actionError || error || status.last_error}</div>}
+	    {copyNotice && <div class="toast" role="status">✓ {copyNotice}</div>}
 
     <section class="status-hero">
       <div class={`status-symbol ${connectionDetected ? "good" : "checking"}`}>{connectionDetected ? "✓" : "⌁"}</div>
@@ -402,14 +475,30 @@ function App() {
         <article class="insight-card baseline-card"><header><span aria-hidden="true">◫</span><div><small>PERSONAL REFERENCE</small><h3>Your baseline</h3></div><i class={`health-dot ${baseline.count >= 10 ? "good" : "muted"}`} /></header><dl><div><dt>Qualified tests</dt><dd>{baseline.count}</dd></div><div><dt>Median download</dt><dd>{baseline.count ? `${mbps(baseline.download_median_bps)} Mbps` : "Collecting data"}</dd></div><div><dt>Maturity</dt><dd>{words(baseline.maturity)}</dd></div><div><dt>Network incidents</dt><dd class={activeIncidents.length ? "text-warning" : "text-good"}>{activeIncidents.length || "None"}</dd></div></dl></article>
         <article class="insight-card plan-card"><header><span aria-hidden="true">◇</span><div><small>SUBSCRIBED OFFER</small><h3>Plan diagnosis</h3></div><i class={`health-dot ${verdict ? (verdict.level === "on_par" ? "good" : verdict.level === "below_plan" ? "warning" : "danger") : "muted"}`} /></header>{planState ? <dl><div><dt>Country</dt><dd>{planState.offer.country_name}</dd></div><div><dt>Your offer</dt><dd>{planState.offer.isp + " · " + planState.offer.name}</dd></div><div><dt>Advertised</dt><dd>{"Up to " + (verdict?.advertised_download_mbps || planState.offer.download_mbps) + " Mbps"}</dd></div><div><dt>Latest comparison</dt><dd class={verdict?.level === "on_par" ? "text-good" : verdict ? "text-warning" : ""}>{verdict ? verdict.download_pct + "% · " + verdict.summary : "Run a test to compare"}</dd></div></dl> : <div class="plan-empty"><p>Select your provider and offer to compare measured performance with what you pay for.</p><button class="mini-button" onClick={() => setPlanOpen(true)}>Choose your plan</button></div>}</article>
       </div>
-      <section class="export-panel"><div class="export-copy"><span class="export-mark" aria-hidden="true">▤</span><div><p class="eyebrow">Evidence package</p><h3>Take your results with you</h3><p>Create a polished report for your provider or download the underlying measurements for deeper analysis.</p></div></div><div class="report-actions"><button class="export-button pdf" disabled={!!exporting} onClick={() => void exportReport("pdf")}><span class="file-badge">PDF</span><span><b>{exporting === "pdf" ? "Creating report…" : "Professional report"}</b><small>Branded, readable and ready to share</small></span><i>↓</i></button><button class="export-button csv" disabled={!!exporting} onClick={() => void exportReport("csv")}><span class="file-badge">CSV</span><span><b>{exporting === "csv" ? "Preparing data…" : "Raw measurement data"}</b><small>Complete rows for your own analysis</small></span><i>↓</i></button></div></section>
-    </div></details>
+	      <section class="export-panel"><div class="export-copy"><span class="export-mark" aria-hidden="true">▤</span><div><p class="eyebrow">Evidence package</p><h3>Take your results with you</h3><p>Create a polished report for your provider or download the underlying measurements for deeper analysis.</p></div></div><div class="report-actions"><button class="export-button pdf" disabled={!!exporting} onClick={() => void exportReport("pdf")}><span class="file-badge">PDF</span><span><b>{exporting === "pdf" ? "Creating report…" : "Professional report"}</b><small>Branded, readable and ready to share</small></span><i>↓</i></button><button class="export-button csv" disabled={!!exporting} onClick={() => void exportReport("csv")}><span class="file-badge">CSV</span><span><b>{exporting === "csv" ? "Preparing data…" : "Raw measurement data"}</b><small>Complete rows for your own analysis</small></span><i>↓</i></button></div></section>
+	      <section class={`complaint-panel ${assessment.complaint_ready ? "ready" : ""}`}>
+	        <div class="complaint-head"><span class="complaint-mark" aria-hidden="true">✦</span><div><p class="eyebrow">Seven-day provider case</p><h3>{assessment.complaint_ready ? "Your complaint package is ready" : "Build a credible complaint automatically"}</h3><p>FiberPulse consolidates 3 qualified tests per day, your installation details and your subscribed offer into a professional provider dossier.</p></div><span class={`case-status ${assessment.complaint_ready ? "ready" : "collecting"}`}>{assessment.complaint_ready ? "READY" : "COLLECTING"}</span></div>
+	        <div class="complaint-progress">
+	          <article><div><span>Qualified tests · target {assessment.target_tests}</span><b>{assessment.qualified_tests} qualified</b></div><progress max={assessment.target_tests} value={Math.min(assessment.qualified_tests, assessment.target_tests)} /></article>
+	          <article><div><span>Observed days</span><b>{assessment.observed_days} / {assessment.target_days}</b></div><progress max={assessment.target_days} value={Math.min(assessment.observed_days, assessment.target_days)} /></article>
+	          <article><div><span>Subscriber profile</span><b>{assessment.profile_complete ? "Complete" : "Required"}</b></div><progress max={1} value={assessment.profile_complete ? 1 : 0} /></article>
+	          <article><div><span>7-day median vs plan</span><b>{assessment.median_download_mbps ? `${assessment.median_download_mbps.toFixed(0)} Mbps · ${assessment.download_percent}%` : "Collecting"}</b></div><progress max={100} value={Math.min(assessment.download_percent, 100)} /></article>
+	        </div>
+	        {assessment.reasons?.length ? <div class="case-guidance">{assessment.reasons.map(reason => <span>• {reason}</span>)}</div> : <div class="case-guidance success">✓ Evidence threshold reached. Review the generated text before sending.</div>}
+	        <div class="support-strip"><div><small>OFFICIAL PROVIDER CHANNEL</small><b>{complaint.contact.isp || planState?.offer.isp || "Select your provider"}</b><span>{[complaint.contact.email, complaint.contact.phone].filter(Boolean).join(" · ") || "Use the verified support page or add the contact printed on your bill."}</span></div>{complaint.contact.support_url && <a class="mini-button support-link" href={complaint.contact.support_url} target="_blank" rel="noreferrer">Open support ↗</a>}</div>
+	        <div class="complaint-actions"><button class="button secondary" onClick={() => setProfileOpen(true)}>{assessment.profile_complete ? "Edit subscriber profile" : "Complete subscriber profile"}</button><button class="button secondary" onClick={() => setComplaintOpen(true)}>Preview & copy</button><button class="button secondary" disabled={!!exporting} onClick={() => void exportReport("complaint-pdf")}>{exporting === "complaint-pdf" ? "Creating PDF…" : "Download complaint PDF"}</button><button class="button primary" disabled={!assessment.complaint_ready || !!exporting} onClick={() => void exportReport("complaint-eml")}>{exporting === "complaint-eml" ? "Creating email…" : "Email file + PDF attached"}</button><button class="button quiet" disabled={!assessment.complaint_ready || !complaint.draft.to} onClick={openEmail}>Open email app</button></div>
+	        <p class="complaint-footnote">FiberPulse never sends a complaint automatically. The .eml file includes the PDF attachment; “Open email app” fills the text only, so attach the downloaded PDF manually.</p>
+	      </section>
+	      {status.sponsor && status.test_state === "idle" && <aside class="sponsor-card" aria-label="Sponsored partner message"><div><small>{status.sponsor.label || "Sponsored"}</small><b>{status.sponsor.headline}</b><span>{status.sponsor.body}</span></div><a href={status.sponsor.url} target="_blank" rel="nofollow sponsored noreferrer">{status.sponsor.cta} ↗</a></aside>}
+	    </div></details>
 
     <footer><span>FiberPulse {status.version}</span><span>Private by default · Data stored locally</span></footer>
 
-    {settingsOpen && <div class="modal-backdrop"><section class="modal settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><button class="modal-close" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button><p class="eyebrow">Settings</p><h2 id="settings-title">Simple controls</h2><div class="setting-row"><div><b>Internet speed tests</b><span>{status.mlab_consent.granted ? "Allowed permanently" : "Disabled"}</span></div>{status.mlab_consent.granted ? <button class="mini-button danger" onClick={() => void saveMeasurementPermission(false)}>Disable</button> : <button class="mini-button" onClick={() => { setSettingsOpen(false); setPermissionOpen(true); }}>Enable</button>}</div><div class="setting-row"><div><b>Automatic monitoring</b><span>{status.paused ? "Paused" : "Running"}</span></div><button class="mini-button" onClick={() => void run("pause", { paused: !status.paused })}>{status.paused ? "Resume" : "Pause"}</button></div><div class="setting-row"><div><b>Anonymous sharing</b><span>{status.sharing_consent.granted ? "Enabled" : status.sharing_available ? "Optional and disabled" : "Unavailable in this build"}</span></div>{status.sharing_consent.granted ? <button class="mini-button danger" onClick={() => void saveSharing(false)}>Disable</button> : <button class="mini-button" disabled={!status.sharing_available} onClick={() => { setSettingsOpen(false); setSharingOpen(true); }}>Enable</button>}</div><div class="setting-row"><div><b>Your Internet plan</b><span>{planState ? planState.offer.country_name + " · " + planState.offer.isp + " · " + planState.offer.name : "Not selected"}</span></div><button class="mini-button" onClick={() => { setSettingsOpen(false); setPlanOpen(true); }}>{planState ? "Change" : "Choose"}</button></div><p class="settings-note">Your choices are saved on this device. FiberPulse will not ask again automatically.</p></section></div>}
+	    {settingsOpen && <div class="modal-backdrop"><section class="modal settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><button class="modal-close" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button><p class="eyebrow">Settings</p><h2 id="settings-title">Simple controls</h2><div class="setting-row"><div><b>Internet speed tests</b><span>{status.mlab_consent.granted ? "Allowed permanently" : "Disabled"}</span></div>{status.mlab_consent.granted ? <button class="mini-button danger" onClick={() => void saveMeasurementPermission(false)}>Disable</button> : <button class="mini-button" onClick={() => { setSettingsOpen(false); setPermissionOpen(true); }}>Enable</button>}</div><div class="setting-row"><div><b>Automatic monitoring</b><span>{status.paused ? "Paused" : "Running"}</span></div><button class="mini-button" onClick={() => void run("pause", { paused: !status.paused })}>{status.paused ? "Resume" : "Pause"}</button></div><div class="setting-row"><div><b>Anonymous sharing</b><span>{status.sharing_consent.granted ? "Enabled" : status.sharing_available ? "Optional and disabled" : "Unavailable in this build"}</span></div>{status.sharing_consent.granted ? <button class="mini-button danger" onClick={() => void saveSharing(false)}>Disable</button> : <button class="mini-button" disabled={!status.sharing_available} onClick={() => { setSettingsOpen(false); setSharingOpen(true); }}>Enable</button>}</div><div class="setting-row"><div><b>Your Internet plan</b><span>{planState ? planState.offer.country_name + " · " + planState.offer.isp + " · " + planState.offer.name : "Not selected"}</span></div><button class="mini-button" onClick={() => { setSettingsOpen(false); setPlanOpen(true); }}>{planState ? "Change" : "Choose"}</button></div><div class="setting-row"><div><b>Subscriber profile</b><span>{assessment.profile_complete ? "Ready for provider reports" : "Account details not completed"}</span></div><button class="mini-button" onClick={() => { setSettingsOpen(false); setProfileOpen(true); }}>{assessment.profile_complete ? "Edit" : "Complete"}</button></div><p class="settings-note">Your choices are saved on this device. FiberPulse will not ask again automatically.</p></section></div>}
    {showPermission && <MeasurementPermission firstRun={firstRun} busy={busy} error={actionError} onSave={granted => void saveMeasurementPermission(granted)} onClose={() => setPermissionOpen(false)} />}
-    {planOpen && <PlanModal catalog={status.plan_catalog || []} current={planState?.offer} busy={busy} onSave={selection => void savePlan(selection)} onClose={() => setPlanOpen(false)} />}
+	    {planOpen && <PlanModal catalog={status.plan_catalog || []} current={planState?.offer} busy={busy} onSave={selection => void savePlan(selection)} onClose={() => setPlanOpen(false)} />}
+	    {profileOpen && <ProfileModal profile={complaint.profile} busy={busy} error={actionError} onSave={profile => void saveProfile(profile)} onClose={() => setProfileOpen(false)} />}
+	    {complaintOpen && <ComplaintModal complaint={complaint} onClose={() => setComplaintOpen(false)} onCopy={(value, label) => void copyText(value, label)} />}
     {testPreflight && <TestPreflightNotice mode={testPreflight} busy={busy} onContinue={continueTest} onClose={() => setTestPreflight(null)} />}
     {sharingOpen && <SharingPermission busy={busy} error={actionError} onSave={granted => void saveSharing(granted)} onClose={() => setSharingOpen(false)} />}
   </main>;

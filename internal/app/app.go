@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"fiberpulse.dev/agent/internal/baseline"
+	"fiberpulse.dev/agent/internal/complaint"
 	"fiberpulse.dev/agent/internal/confidence"
 	"fiberpulse.dev/agent/internal/health"
 	"fiberpulse.dev/agent/internal/incidents"
@@ -22,6 +23,7 @@ import (
 	"fiberpulse.dev/agent/internal/reporting"
 	"fiberpulse.dev/agent/internal/scheduler"
 	"fiberpulse.dev/agent/internal/sharing"
+	"fiberpulse.dev/agent/internal/sponsor"
 	"fiberpulse.dev/agent/internal/storage"
 	"github.com/google/uuid"
 )
@@ -30,12 +32,20 @@ const consentPolicyVersion = "privacy-v1"
 const incidentRuntimeSetting = "incident_runtime_v1"
 const connectivityRuntimeSetting = "connectivity_runtime_v1"
 const planSelectionSetting = "plan_selection_v1"
+const subscriberProfileSetting = "subscriber_profile_v1"
 
 // PlanState exposes the subscriber's chosen ISP offer and, once a complete
 // measurement exists, how that measurement compares with the advertised plan.
 type PlanState struct {
 	Offer   plan.Offer    `json:"offer"`
 	Verdict *plan.Verdict `json:"verdict,omitempty"`
+}
+
+type ComplaintState struct {
+	Profile    complaint.Profile        `json:"profile"`
+	Contact    complaint.SupportContact `json:"contact"`
+	Assessment complaint.Assessment     `json:"assessment"`
+	Draft      complaint.Draft          `json:"draft"`
 }
 
 type persistedPlanSelection struct {
@@ -54,6 +64,7 @@ type Config struct {
 	DNSName                 string
 	SharingTransportEnabled bool
 	Logger                  *slog.Logger
+	Sponsor                 sponsor.Offer
 }
 
 type App struct {
@@ -109,9 +120,11 @@ type Snapshot struct {
 	SharingAvailable  bool                  `json:"sharing_available"`
 	Baseline          baseline.Result       `json:"baseline"`
 	Plan              *PlanState            `json:"plan,omitempty"`
+	Complaint         ComplaintState        `json:"complaint"`
 	PlanCatalog       []plan.Offer          `json:"plan_catalog"`
 	Incidents         []incidents.Record    `json:"incidents"`
 	Reports           []reporting.Record    `json:"reports"`
+	Sponsor           *sponsor.Offer        `json:"sponsor,omitempty"`
 	LastError         string                `json:"last_error,omitempty"`
 }
 
@@ -127,6 +140,11 @@ func New(config Config) (*App, error) {
 	if config.Provider == nil {
 		return nil, errors.New("measurement provider is required")
 	}
+	validatedSponsor, err := sponsor.Validate(config.Sponsor)
+	if err != nil {
+		return nil, fmt.Errorf("validate sponsor placement: %w", err)
+	}
+	config.Sponsor = validatedSponsor
 	store, err := storage.Open(config.DatabasePath)
 	if err != nil {
 		return nil, err
@@ -191,8 +209,11 @@ func (a *App) Start() (string, error) {
 	}
 	now := time.Now().UTC()
 	minimumNext := now.Add(scheduler.RecoveryDelay(randomUnit()))
+	maximumNext := now.Add(scheduler.NextInterval(3, 1))
 	if next.IsZero() || next.Before(minimumNext) {
 		next = minimumNext
+	} else if next.After(maximumNext) {
+		next = maximumNext
 	}
 	schedulerState := scheduler.Waiting
 	if paused || !mlab.Granted {
@@ -295,6 +316,10 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 	}
 	personalBaseline := calculateBaseline(results)
 	planState := a.currentPlan(ctx, results)
+	complaintState, err := a.currentComplaint(ctx, results, planState, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
 	a.connectMu.Lock()
 	connectivityState := a.connectivity.State()
 	a.connectMu.Unlock()
@@ -305,7 +330,35 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 		copy := a.testProgress
 		progress = &copy
 	}
-	return Snapshot{TestProgress: progress, Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), ConnectivityState: string(connectivityState), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Plan: planState, PlanCatalog: plan.Catalog(), Incidents: recentIncidents, Reports: recentReports, LastError: a.lastError}, nil
+	var sponsorOffer *sponsor.Offer
+	if a.config.Sponsor.Enabled() {
+		copy := a.config.Sponsor
+		sponsorOffer = &copy
+	}
+	return Snapshot{TestProgress: progress, Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), ConnectivityState: string(connectivityState), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Plan: planState, Complaint: complaintState, PlanCatalog: plan.Catalog(), Incidents: recentIncidents, Reports: recentReports, Sponsor: sponsorOffer, LastError: a.lastError}, nil
+}
+
+func (a *App) currentComplaint(ctx context.Context, results []measurement.Result, planState *PlanState, now time.Time) (ComplaintState, error) {
+	var profile complaint.Profile
+	if _, err := a.store.GetSetting(ctx, subscriberProfileSetting, &profile); err != nil {
+		return ComplaintState{}, fmt.Errorf("load subscriber profile: %w", err)
+	}
+	var offer *plan.Offer
+	var contact complaint.SupportContact
+	if planState != nil {
+		selected := planState.Offer
+		offer = &selected
+		contact = complaint.ContactForISP(selected.ISP)
+	}
+	if profile.SupportEmailOverride != "" {
+		contact.Email = profile.SupportEmailOverride
+	}
+	if profile.SupportPhoneOverride != "" {
+		contact.Phone = profile.SupportPhoneOverride
+	}
+	assessment := complaint.Assess(results, offer, profile, now)
+	draft := complaint.BuildDraft(profile, offer, contact, assessment)
+	return ComplaintState{Profile: profile, Contact: contact, Assessment: assessment, Draft: draft}, nil
 }
 
 // currentPlan resolves the persisted plan selection and, when a complete
@@ -412,6 +465,18 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 			return a.setCustomPlanSelection(ctx, *body.Custom)
 		}
 		return a.setPlanSelection(ctx, body.OfferID)
+	case "profile":
+		var profile complaint.Profile
+		if err := json.Unmarshal(raw, &profile); err != nil {
+			return err
+		}
+		normalized, err := complaint.ValidateProfile(profile)
+		if err != nil {
+			return err
+		}
+		return a.store.SetSetting(ctx, subscriberProfileSetting, normalized)
+	case "profile-clear":
+		return a.store.SetSetting(ctx, subscriberProfileSetting, complaint.Profile{})
 	case "incident-dismiss":
 		var body struct {
 			ID string `json:"id"`
@@ -604,6 +669,9 @@ func (a *App) TogglePause(ctx context.Context) error {
 }
 
 func (a *App) Export(ctx context.Context, format string) ([]byte, string, error) {
+	if format == "complaint-pdf" || format == "complaint-eml" {
+		return a.exportComplaint(ctx, format)
+	}
 	if format != "csv" && format != "pdf" {
 		return nil, "", errors.New("unsupported export format")
 	}
@@ -674,6 +742,42 @@ func (a *App) Export(ctx context.Context, format string) ([]byte, string, error)
 		return failFrom(reporting.Exporting, "report.persistence_failed", err)
 	}
 	return body, contentType, nil
+}
+
+func (a *App) exportComplaint(ctx context.Context, format string) ([]byte, string, error) {
+	results, err := a.store.ListResults(ctx, 10000)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(results) == 0 {
+		return nil, "", errors.New("no measurements are available for this complaint package")
+	}
+	now := time.Now().UTC()
+	planState := a.currentPlan(ctx, results)
+	state, err := a.currentComplaint(ctx, results, planState, now)
+	if err != nil {
+		return nil, "", err
+	}
+	var offer *plan.Offer
+	if planState != nil {
+		selected := planState.Offer
+		offer = &selected
+	}
+	pdf, err := reporting.ComplaintPDF(results, state.Assessment.WindowStart, state.Assessment.WindowEnd, offer, state.Profile, state.Assessment, state.Contact)
+	if err != nil {
+		return nil, "", err
+	}
+	if format == "complaint-pdf" {
+		return pdf, "application/pdf", nil
+	}
+	if !state.Assessment.ComplaintReady {
+		return nil, "", errors.New("the complaint email becomes available after 21 qualified tests across 7 days, a complete subscriber profile, and confirmed underperformance")
+	}
+	body, err := complaint.EML(state.Draft, pdf)
+	if err != nil {
+		return nil, "", err
+	}
+	return body, "message/rfc822", nil
 }
 
 func (a *App) deleteReport(ctx context.Context, id string) error {
@@ -873,7 +977,7 @@ func (a *App) runTest(kind scheduler.Kind, before measurement.NetworkContext) {
 	}
 	a.mu.Lock()
 	if kind == scheduler.Automatic {
-		a.nextRun = time.Now().UTC().Add(scheduler.NextInterval(2, randomUnit()))
+		a.nextRun = time.Now().UTC().Add(scheduler.NextInterval(3, randomUnit()))
 	}
 	next := a.nextRun
 	paused := a.paused

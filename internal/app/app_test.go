@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"fiberpulse.dev/agent/internal/complaint"
 	"fiberpulse.dev/agent/internal/health"
 	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/measurement"
@@ -107,6 +108,28 @@ func TestStartRepairsStoppedSchedulerStateWithoutAdvancingFutureRun(t *testing.T
 	}
 	if state != scheduler.Waiting || paused || !storedNext.Equal(next) {
 		t.Fatalf("state=%s next=%s paused=%v", state, storedNext, paused)
+	}
+}
+
+func TestStartClampsLegacyLongAutomaticDelay(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	if err := a.store.SetConsent(ctx, storage.Consent{Scope: "mlab", Granted: true, PolicyVersion: consentPolicyVersion}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.store.SetScheduler(ctx, scheduler.Waiting, time.Now().UTC().Add(48*time.Hour), false); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	if _, err := a.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_, next, _, err := a.store.Scheduler(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.After(started.Add(9*time.Hour + 15*time.Minute)) {
+		t.Fatalf("legacy delay was not clamped: %s", next.Sub(started))
 	}
 }
 
@@ -636,5 +659,62 @@ func TestEmptyReportFailsVisibly(t *testing.T) {
 	reports, err := a.store.ListReports(context.Background(), 10)
 	if err != nil || len(reports) != 1 || reports[0].State != reporting.Failed || reports[0].ErrorCode != "report.no_measurements" {
 		t.Fatalf("failed report=%+v err=%v", reports, err)
+	}
+}
+
+func TestSubscriberProfileAndComplaintPackage(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	if err := a.Action(ctx, "plan", []byte(`{"offer_id":"converge-super-prime-2099"}`)); err != nil {
+		t.Fatal(err)
+	}
+	profileBody := []byte(`{"full_name":"Test Subscriber","account_number":"ACC-123","service_address":"Cebu City","contact_email":"subscriber@example.com","provider_router":"Provider Router","test_connection":"ethernet","network_layout":"provider_router_direct"}`)
+	if err := a.Action(ctx, "profile", profileBody); err != nil {
+		t.Fatal(err)
+	}
+
+	ph := time.FixedZone("PHT", 8*60*60)
+	nowLocal := time.Now().In(ph)
+	endDay := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, ph)
+	if nowLocal.Hour() < 3 {
+		endDay = endDay.AddDate(0, 0, -1)
+	}
+	for day := 0; day < complaint.TargetDays; day++ {
+		for sample := 0; sample < 3; sample++ {
+			started := endDay.AddDate(0, 0, -(complaint.TargetDays - 1 - day)).Add(time.Duration(sample)*time.Hour + 15*time.Minute).UTC()
+			result := measurement.Result{
+				ID: fmt.Sprintf("complaint-%d-%d", day, sample), Provider: measurement.ProviderMLabNDT7,
+				ProtocolVersion: "ndt7", ClientVersion: "test", SchemaVersion: measurement.SchemaVersion,
+				MethodologyVersion: measurement.MethodologyVersion, ConfidenceVersion: measurement.ConfidenceVersion,
+				StartedAt: started, CompletedAt: started.Add(time.Minute), ServerFQDN: "ndt.example",
+				DownloadBPS: 400_000_000, UploadBPS: 350_000_000, MinRTTUS: 11_000,
+				Status: measurement.StatusComplete, ConfidenceLevel: "high", ConfidenceScore: 95, PublicEligible: true,
+				NetworkBefore: measurement.NetworkContext{ConnectionType: measurement.ConnectionEthernet, Online: true},
+				NetworkAfter:  measurement.NetworkContext{ConnectionType: measurement.ConnectionEthernet, Online: true},
+			}
+			if err := a.store.SaveResult(ctx, result); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	raw, err := a.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := raw.(Snapshot)
+	if !snapshot.Complaint.Assessment.ComplaintReady || snapshot.Complaint.Assessment.QualifiedTests != 21 || snapshot.Complaint.Profile.AccountNumber != "ACC-123" {
+		t.Fatalf("complaint state not ready: %+v", snapshot.Complaint)
+	}
+	pdf, pdfType, err := a.Export(ctx, "complaint-pdf")
+	if err != nil || pdfType != "application/pdf" || !bytes.HasPrefix(pdf, []byte("%PDF")) {
+		t.Fatalf("complaint PDF type=%q size=%d err=%v", pdfType, len(pdf), err)
+	}
+	eml, emlType, err := a.Export(ctx, "complaint-eml")
+	if err != nil || emlType != "message/rfc822" || !bytes.Contains(eml, []byte("fiberpulse-complaint-report.pdf")) {
+		t.Fatalf("complaint EML type=%q size=%d err=%v", emlType, len(eml), err)
+	}
+	reports, err := a.store.ListReports(ctx, 10)
+	if err != nil || len(reports) != 0 {
+		t.Fatalf("complaint exports must not violate pdf/csv report history: reports=%+v err=%v", reports, err)
 	}
 }

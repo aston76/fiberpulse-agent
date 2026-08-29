@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"fiberpulse.dev/agent/internal/complaint"
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/plan"
 	"github.com/signintech/gopdf"
@@ -46,6 +47,28 @@ func PDF(results []measurement.Result, periodStart, periodEnd time.Time) ([]byte
 // conservative: observed NDT7 performance is evidence, not proof of physical
 // line capacity or ISP responsibility.
 func PDFWithPlan(results []measurement.Result, periodStart, periodEnd time.Time, offer *plan.Offer) ([]byte, error) {
+	r, err := newReportPDF()
+	if err != nil {
+		return nil, err
+	}
+	renderPerformanceReport(r, results, periodStart, periodEnd, offer)
+	return r.bytes()
+}
+
+// ComplaintPDF creates a provider-ready dossier. Subscriber details remain in
+// the locally generated document and are never copied to FiberPulse logs.
+func ComplaintPDF(results []measurement.Result, periodStart, periodEnd time.Time, offer *plan.Offer, profile complaint.Profile, assessment complaint.Assessment, contact complaint.SupportContact) ([]byte, error) {
+	r, err := newReportPDF()
+	if err != nil {
+		return nil, err
+	}
+	r.addPage("COMPLAINT DOSSIER")
+	r.drawComplaintCover(profile, offer, assessment, contact)
+	renderPerformanceReport(r, results, periodStart, periodEnd, offer)
+	return r.bytes()
+}
+
+func newReportPDF() (*reportPDF, error) {
 	pdf := &gopdf.GoPdf{}
 	pdf.Start(gopdf.Config{PageSize: *gopdf.PageSizeA4})
 	if err := pdf.AddTTFFontData("GoRegular", goregular.TTF); err != nil {
@@ -62,7 +85,10 @@ func PDFWithPlan(results []measurement.Result, periodStart, periodEnd time.Time,
 	if err != nil {
 		return nil, fmt.Errorf("decode embedded report logo: %w", err)
 	}
-	r := &reportPDF{pdf: pdf, logo: logo, pageWidth: 595.28, pageHeight: 841.89, margin: 42}
+	return &reportPDF{pdf: pdf, logo: logo, pageWidth: 595.28, pageHeight: 841.89, margin: 42}, nil
+}
+
+func renderPerformanceReport(r *reportPDF, results []measurement.Result, periodStart, periodEnd time.Time, offer *plan.Offer) {
 	reportResults := reportableResults(results)
 	excluded := len(results) - len(reportResults)
 	complete := completedResults(reportResults)
@@ -73,11 +99,14 @@ func PDFWithPlan(results []measurement.Result, periodStart, periodEnd time.Time,
 	r.drawPlanComparison(offer, complete)
 	r.drawEvidenceNote(excluded)
 	r.drawMeasurements(reportResults)
+}
+
+func (r *reportPDF) bytes() ([]byte, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
 	var out bytes.Buffer
-	if _, err := pdf.WriteTo(&out); err != nil {
+	if _, err := r.pdf.WriteTo(&out); err != nil {
 		return nil, err
 	}
 	return out.Bytes(), nil
@@ -92,6 +121,97 @@ type reportPDF struct {
 	pageHeight float64
 	margin     float64
 	y          float64
+}
+
+func (r *reportPDF) drawComplaintCover(profile complaint.Profile, offer *plan.Offer, assessment complaint.Assessment, contact complaint.SupportContact) {
+	r.fillRect(0, 0, r.pageWidth, 126, 8, 22, 41)
+	r.fillRect(0, 123, r.pageWidth, 3, 8, 199, 245)
+	if r.err != nil {
+		return
+	}
+	r.err = r.pdf.ImageByHolder(r.logo, r.margin, 26, &gopdf.Rect{W: 58, H: 58})
+	r.setFont("GoBold", 21)
+	r.setTextColor(255, 255, 255)
+	r.text(r.margin+72, 37, "Connection complaint dossier")
+	r.setFont("GoRegular", 9.5)
+	r.setTextColor(87, 217, 255)
+	r.text(r.margin+72, 64, "Seven-day evidence package for technical support")
+	status := "COLLECTION IN PROGRESS"
+	statusColor := [3]uint8{255, 183, 67}
+	if assessment.ComplaintReady {
+		status = "READY TO SEND"
+		statusColor = [3]uint8{8, 232, 137}
+	}
+	r.setFont("GoBold", 8)
+	r.setTextColor(statusColor[0], statusColor[1], statusColor[2])
+	r.text(r.margin+72, 88, status)
+	r.setFont("GoRegular", 8)
+	r.setTextColor(158, 177, 197)
+	r.textRight(r.pageWidth-r.margin, 37, "Generated "+time.Now().UTC().Format("2006-01-02 15:04")+" UTC")
+	r.textRight(r.pageWidth-r.margin, 54, fmt.Sprintf("Evidence: %d/%d tests | %d/%d days", assessment.QualifiedTests, assessment.TargetTests, assessment.ObservedDays, assessment.TargetDays))
+	r.y = 148
+
+	r.sectionTitle("SUBSCRIBER AND SERVICE", "Details supplied by the account holder")
+	r.drawKeyValueCard([][2]string{
+		{"Account holder", printable(profile.FullName)},
+		{"Account number", printable(profile.AccountNumber)},
+		{"Service address", printable(profile.ServiceAddress)},
+		{"Contact", joinedContact(profile.ContactEmail, profile.ContactPhone)},
+	}, 92)
+
+	provider, offerName, advertised := printable(contact.ISP), "Not selected", "Not available"
+	if offer != nil {
+		provider, offerName = offer.ISP, offer.Name
+		advertised = fmt.Sprintf("Up to %d Mbps download", assessment.AdvertisedDownloadMbps)
+	}
+	r.sectionTitle("SUBSCRIBED OFFER AND OBSERVED PERFORMANCE", "Consolidated qualified M-Lab NDT7 measurements")
+	r.drawKeyValueCard([][2]string{
+		{"Provider / offer", provider + " - " + offerName},
+		{"Advertised", advertised},
+		{"Seven-day median", fmt.Sprintf("%.1f Mbps download (%d%%) | %.1f Mbps upload", assessment.MedianDownloadMbps, assessment.DownloadPercent, assessment.MedianUploadMbps)},
+		{"Test conditions", fmt.Sprintf("%d Ethernet | %d Wi-Fi | median latency %.1f ms", assessment.WiredTests, assessment.WiFiTests, assessment.MedianLatencyMS)},
+	}, 92)
+
+	r.sectionTitle("INSTALLATION PROFILE", "Equipment and topology supplied by the subscriber")
+	r.drawKeyValueCard([][2]string{
+		{"Provider equipment", joinedEquipment(profile.ProviderModem, profile.ProviderRouter)},
+		{"Additional router", yesModel(profile.AdditionalRouter, profile.AdditionalRouterModel)},
+		{"Mesh system", yesModel(profile.MeshSystem, profile.MeshModel)},
+		{"Test / layout", printable(profile.TestConnection) + " | " + printable(strings.ReplaceAll(profile.NetworkLayout, "_", " "))},
+		{"Typical devices", printable(profile.TypicalDeviceCount)},
+		{"Notes", printable(profile.Notes)},
+	}, 119)
+
+	r.sectionTitle("PROVIDER SUPPORT", "Verified official channel or subscriber override")
+	support := joinedContact(contact.Email, contact.Phone)
+	if support == "Not provided" && contact.SupportURL != "" {
+		support = contact.SupportURL
+	}
+	r.drawKeyValueCard([][2]string{{"Contact", support}, {"Support page", printable(contact.SupportURL)}, {"Contact verified", printable(contact.VerifiedAt)}}, 74)
+
+	r.setFont("GoRegular", 7.4)
+	r.setTextColor(93, 112, 132)
+	r.wrappedText(r.margin, r.y+2, r.pageWidth-2*r.margin, 9.5, "Methodology note: these are application-level M-Lab NDT7 measurements. Repeated low results support a technical investigation, but do not by themselves prove ISP responsibility or physical line capacity. Personal details on this page were entered locally by the subscriber.")
+}
+
+func (r *reportPDF) drawKeyValueCard(rows [][2]string, height float64) {
+	r.fillRect(r.margin, r.y, r.pageWidth-2*r.margin, height, 246, 249, 252)
+	rowHeight := height / float64(len(rows))
+	for i, row := range rows {
+		y := r.y + float64(i)*rowHeight
+		if i > 0 {
+			r.pdf.SetStrokeColor(224, 232, 239)
+			r.pdf.SetLineWidth(0.4)
+			r.pdf.Line(r.margin+12, y, r.pageWidth-r.margin-12, y)
+		}
+		r.setFont("GoBold", 7.3)
+		r.setTextColor(92, 111, 132)
+		r.text(r.margin+13, y+7, strings.ToUpper(row[0]))
+		r.setFont("GoRegular", 8.2)
+		r.setTextColor(24, 46, 67)
+		r.wrappedText(r.margin+137, y+7, r.pageWidth-2*r.margin-150, 9, row[1])
+	}
+	r.y += height + 14
 }
 
 func (r *reportPDF) addPage(section string) {
@@ -444,6 +564,7 @@ func reportableResults(results []measurement.Result) []measurement.Result {
 			out = append(out, result)
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })
 	return out
 }
 
@@ -495,4 +616,36 @@ func formatInteger(value int) string {
 		digits = digits[:i] + "," + digits[i:]
 	}
 	return digits
+}
+
+func printable(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "Not provided"
+	}
+	return strings.TrimSpace(value)
+}
+
+func joinedContact(email, phone string) string {
+	values := make([]string, 0, 2)
+	if strings.TrimSpace(email) != "" {
+		values = append(values, strings.TrimSpace(email))
+	}
+	if strings.TrimSpace(phone) != "" {
+		values = append(values, strings.TrimSpace(phone))
+	}
+	if len(values) == 0 {
+		return "Not provided"
+	}
+	return strings.Join(values, " | ")
+}
+
+func joinedEquipment(modem, router string) string {
+	return "Modem / ONT: " + printable(modem) + " | Router: " + printable(router)
+}
+
+func yesModel(enabled bool, model string) string {
+	if !enabled {
+		return "No"
+	}
+	return "Yes | " + printable(model)
 }

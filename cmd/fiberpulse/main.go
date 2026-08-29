@@ -15,6 +15,7 @@ import (
 	"fiberpulse.dev/agent/internal/app"
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/platform"
+	"fiberpulse.dev/agent/internal/sponsor"
 )
 
 var version = "0.1.0-dev"
@@ -60,7 +61,12 @@ func run() error {
 	if os.Getenv("FIBERPULSE_DEV_FAKE") == "1" {
 		provider = &measurement.FakeProvider{}
 	}
-	agent, err := app.New(app.Config{Version: version, DatabasePath: filepath.Join(dataDir, "fiberpulse.db"), Provider: provider, ProbeURL: os.Getenv("FIBERPULSE_PROBE_URL"), DNSName: os.Getenv("FIBERPULSE_DNS_NAME"), Logger: logger})
+	sponsorOffer := sponsor.Offer{
+		CampaignID: os.Getenv("FIBERPULSE_SPONSOR_CAMPAIGN_ID"), Label: os.Getenv("FIBERPULSE_SPONSOR_LABEL"),
+		Headline: os.Getenv("FIBERPULSE_SPONSOR_HEADLINE"), Body: os.Getenv("FIBERPULSE_SPONSOR_BODY"),
+		CTA: os.Getenv("FIBERPULSE_SPONSOR_CTA"), URL: os.Getenv("FIBERPULSE_SPONSOR_URL"),
+	}
+	agent, err := app.New(app.Config{Version: version, DatabasePath: filepath.Join(dataDir, "fiberpulse.db"), Provider: provider, ProbeURL: os.Getenv("FIBERPULSE_PROBE_URL"), DNSName: os.Getenv("FIBERPULSE_DNS_NAME"), Sponsor: sponsorOffer, Logger: logger})
 	if err != nil {
 		return err
 	}

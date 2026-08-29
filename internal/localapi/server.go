@@ -184,7 +184,15 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=fiberpulse-report.%s", format))
+	filename := map[string]string{
+		"pdf": "fiberpulse-report.pdf", "csv": "fiberpulse-report.csv",
+		"complaint-pdf": "fiberpulse-complaint-report.pdf",
+		"complaint-eml": "fiberpulse-complaint-email.eml",
+	}[format]
+	if filename == "" {
+		filename = fmt.Sprintf("fiberpulse-report.%s", format)
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }

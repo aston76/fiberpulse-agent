@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"time"
 )
 
@@ -78,18 +77,18 @@ func NextInterval(ratePerDay, unitRandom float64) time.Duration {
 	if ratePerDay > MaxAutomatic24H {
 		ratePerDay = MaxAutomatic24H
 	}
-	if unitRandom <= 0 {
-		unitRandom = 1e-9
+	if unitRandom < 0 {
+		unitRandom = 0
 	}
-	if unitRandom >= 1 {
-		unitRandom = math.Nextafter(1, 0)
+	if unitRandom > 1 {
+		unitRandom = 1
 	}
-	hours := -math.Log(1-unitRandom) * 24 / ratePerDay
-	interval := time.Duration(hours * float64(time.Hour))
-	if interval < time.Second {
-		return time.Second
-	}
-	return interval
+	// Keep the requested daily cadence reliable while avoiding synchronized
+	// traffic spikes. A bounded +/-15% jitter cannot create long Poisson gaps
+	// or bursts that immediately exhaust the rolling quota.
+	base := float64(24*time.Hour) / ratePerDay
+	factor := 0.85 + 0.30*unitRandom
+	return time.Duration(base * factor)
 }
 
 func RecoveryDelay(unitRandom float64) time.Duration {

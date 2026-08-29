@@ -76,8 +76,8 @@ func TestManualCooldown(t *testing.T) {
 
 func TestIntervalsAreBoundedAndPositive(t *testing.T) {
 	for _, u := range []float64{0, .01, .5, .99, 1} {
-		if got := NextInterval(2, u); got <= 0 {
-			t.Fatalf("u=%v got=%v", u, got)
+		if got := NextInterval(3, u); got < 6*time.Hour+45*time.Minute || got > 9*time.Hour+15*time.Minute {
+			t.Fatalf("u=%v interval outside bounded three-per-day cadence: %v", u, got)
 		}
 		if got := RecoveryDelay(u); got < 15*time.Minute || got > time.Hour {
 			t.Fatalf("recovery %v", got)
