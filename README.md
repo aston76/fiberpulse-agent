@@ -22,6 +22,27 @@ are built on macOS with `make macos`; GitHub CI verifies both macOS 14 and 15.
 Neither development artifact is approved for
 public distribution until its platform signing gate is complete.
 
+## Command-line installation
+
+After the first signed public release is available, install FiberPulse with one
+command. The bootstrap scripts refuse development artifacts and verify the
+native platform signature before installing anything.
+
+macOS Terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aston76/fiberpulse-agent/main/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/aston76/fiberpulse-agent/main/install.ps1 | iex
+```
+
+Until the signing and notarization gates are complete, both commands stop with
+a clear message and make no installation change.
+
 The updater helper validates a signed, expiring manifest, semantic version and
 monotonic sequence, artifact hash and size, and the native platform signature.
 It starts the replacement agent, waits for a PID-bound health receipt, and
