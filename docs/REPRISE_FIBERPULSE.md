@@ -461,6 +461,14 @@ Décision : ADR 0001 (critères) + ADR 0002 (toutes les vagues fusionnées) dans
 - Une maintenance GitHub Actions quotidienne à 01:17 UTC crée une sauvegarde SQLite transactionnelle dans le répertoire privé, vérifie son intégrité, conserve 35 jours de sauvegardes et purge uniquement les nonces expirés et installations techniques inactives depuis plus de 366 jours. Les mesures historiques ne sont pas purgées par cette maintenance.
 - Preuve de production : run `33327951193`, sauvegarde de 40 960 octets, puis `/api/v1/health` avec `status: ok`, `storage: true`, `signatures: true` et `backup_fresh: true`.
 
+### Correctif responsive et interactions statiques du 31/08/2026
+
+- Le commit site `fa2449d` remplace le ruban de drapeaux mobile par un sélecteur repliable contenant les sept langues. Les raccourcis restent visibles sur ordinateur.
+- Sur `/` et `/privacy/`, le runtime statique détecte `navigator.languages` et choisit automatiquement la langue prise en charge la plus proche. Un choix manuel est mémorisé et reste prioritaire. Aucune géolocalisation n'est demandée ni utilisée.
+- L'export o2switch rétablit, via `deploy/o2switch/site-runtime.js`, l'animation du test principal, Replay, la simulation de diagnostic, la séquence de 21 mesures et la copie des commandes, sans réintroduire le runtime RSC incompatible avec l'hébergement statique.
+- L'export fixe aussi la langue réelle de `<html lang>` pour chaque route (`en`, `fr`, `de`, `es`, `pt-BR`, `it`, `hi`).
+- Preuves : lint et build réussis, export statique complet de 14 pages, QA à 320/390/768/1440 px sans débordement horizontal, détection française et choix manuel anglais vérifiés, animations testées dans le navigateur. Déploiement o2switch réussi : run `33330873047`; `/api/v1/health` conserve `storage: true`.
+
 ## 16. Critères de fin pour la prochaine reprise
 
 Ne considérer la distribution comme terminée que si :
