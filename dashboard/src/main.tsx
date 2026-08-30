@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import brandMark from "./assets/fiberpulse-mark.png";
+import { localeOptions, useLocale } from "./i18n";
 import "./styles.css";
 
 type Consent = { granted: boolean; policy_version?: string; occurred_at?: string };
@@ -27,7 +28,7 @@ type Envelope = { csrf_token: string; data: Status };
 
 const mbps = (value = 0) => value > 0 ? (value / 1_000_000).toFixed(value >= 100_000_000 ? 0 : 1) : "—";
 const latency = (value = 0) => value > 0 ? (value / 1000).toFixed(value >= 100_000 ? 0 : 1) : "—";
-const date = (value?: string) => value ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "Not scheduled";
+const date = (value?: string) => value ? new Intl.DateTimeFormat(document.documentElement.lang || undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "Not scheduled";
 
 // countryFlag renders the ISO code as a flag emoji; on Windows, where flag
 // emoji are not drawn, the regional letters still read as the country code.
@@ -349,6 +350,7 @@ function ComplaintModal({ complaint, onClose, onCopy }: { complaint: ComplaintSt
 }
 
 function App() {
+  const { locale, setLocale } = useLocale();
   const { envelope, error, refresh, action } = useStatus();
   const [actionError, setActionError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -405,13 +407,13 @@ function App() {
   };
   const saveMeasurementPermission = async (granted: boolean) => {
     setActionError(""); setBusy(true);
-    try { await action("consent", { scope: "mlab", granted, language: "en" }); setPermissionOpen(false); }
+    try { await action("consent", { scope: "mlab", granted, language: locale }); setPermissionOpen(false); }
     catch (cause) { setActionError(cause instanceof Error ? cause.message : "Unable to save your choice"); }
     finally { setBusy(false); }
   };
   const saveSharing = async (granted: boolean) => {
     setActionError(""); setBusy(true);
-    try { await action("consent", { scope: "fiberpulse", granted, language: "en" }); setSharingOpen(false); }
+    try { await action("consent", { scope: "fiberpulse", granted, language: locale }); setSharingOpen(false); }
     catch (cause) { setActionError(cause instanceof Error ? cause.message : "Unable to save your choice"); }
     finally { setBusy(false); }
   };
@@ -515,7 +517,17 @@ function App() {
 
     <footer><span>FiberPulse {status.version}</span><span>Private by default · Data stored locally</span></footer>
 
-	    {settingsOpen && <div class="modal-backdrop"><section class="modal settings" role="dialog" aria-modal="true" aria-labelledby="settings-title"><button class="modal-close" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button><p class="eyebrow">Settings</p><h2 id="settings-title">Simple controls</h2><div class="setting-row"><div><b>Internet speed tests</b><span>{status.mlab_consent.granted ? "Allowed permanently" : "Disabled"}</span></div>{status.mlab_consent.granted ? <button class="mini-button danger" onClick={() => void saveMeasurementPermission(false)}>Disable</button> : <button class="mini-button" onClick={() => { setSettingsOpen(false); setPermissionOpen(true); }}>Enable</button>}</div><div class="setting-row"><div><b>Automatic monitoring</b><span>{status.paused ? "Paused" : "Running"}</span></div><button class="mini-button" onClick={() => void run("pause", { paused: !status.paused })}>{status.paused ? "Resume" : "Pause"}</button></div><div class="setting-row"><div><b>Anonymous sharing</b><span>{status.sharing_consent.granted ? "Enabled" : status.sharing_available ? "Optional and disabled" : "Unavailable in this build"}</span></div>{status.sharing_consent.granted ? <button class="mini-button danger" onClick={() => void saveSharing(false)}>Disable</button> : <button class="mini-button" disabled={!status.sharing_available} onClick={() => { setSettingsOpen(false); setSharingOpen(true); }}>Enable</button>}</div><div class="setting-row"><div><b>Your Internet plan</b><span>{planState ? countryFlag(planState.offer.country_code) + " " + planState.offer.country_name + " · " + planState.offer.isp + " · " + planState.offer.name : "Not selected"}</span></div><button class="mini-button" onClick={() => { setSettingsOpen(false); setPlanOpen(true); }}>{planState ? "Change" : "Choose"}</button></div><div class="setting-row"><div><b>Subscriber profile</b><span>{assessment.profile_complete ? "Ready for provider reports" : "Account details not completed"}</span></div><button class="mini-button" onClick={() => { setSettingsOpen(false); setProfileOpen(true); }}>{assessment.profile_complete ? "Edit" : "Complete"}</button></div><p class="settings-note">Your choices are saved on this device. FiberPulse will not ask again automatically.</p></section></div>}
+	    {settingsOpen && <div class="modal-backdrop"><section class="modal settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <button class="modal-close" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button>
+        <p class="eyebrow">Settings</p><h2 id="settings-title">Simple controls</h2>
+        <div class="setting-row language-setting"><div><b>Language</b><span key={locale}>{localeOptions.find(option => option.code === locale)?.label}</span></div><select aria-label="Language" value={locale} onChange={event => setLocale(event.currentTarget.value as typeof locale)}>{localeOptions.map(option => <option value={option.code}>{option.label}</option>)}</select></div>
+        <div class="setting-row"><div><b>Internet speed tests</b><span>{status.mlab_consent.granted ? "Allowed permanently" : "Disabled"}</span></div>{status.mlab_consent.granted ? <button class="mini-button danger" onClick={() => void saveMeasurementPermission(false)}>Disable</button> : <button class="mini-button" onClick={() => { setSettingsOpen(false); setPermissionOpen(true); }}>Enable</button>}</div>
+        <div class="setting-row"><div><b>Automatic monitoring</b><span>{status.paused ? "Paused" : "Running"}</span></div><button class="mini-button" onClick={() => void run("pause", { paused: !status.paused })}>{status.paused ? "Resume" : "Pause"}</button></div>
+        <div class="setting-row"><div><b>Anonymous sharing</b><span>{status.sharing_consent.granted ? "Enabled" : status.sharing_available ? "Optional and disabled" : "Unavailable in this build"}</span></div>{status.sharing_consent.granted ? <button class="mini-button danger" onClick={() => void saveSharing(false)}>Disable</button> : <button class="mini-button" disabled={!status.sharing_available} onClick={() => { setSettingsOpen(false); setSharingOpen(true); }}>Enable</button>}</div>
+        <div class="setting-row"><div><b>Your Internet plan</b><span>{planState ? countryFlag(planState.offer.country_code) + " " + planState.offer.country_name + " · " + planState.offer.isp + " · " + planState.offer.name : "Not selected"}</span></div><button class="mini-button" onClick={() => { setSettingsOpen(false); setPlanOpen(true); }}>{planState ? "Change" : "Choose"}</button></div>
+        <div class="setting-row"><div><b>Subscriber profile</b><span>{assessment.profile_complete ? "Ready for provider reports" : "Account details not completed"}</span></div><button class="mini-button" onClick={() => { setSettingsOpen(false); setProfileOpen(true); }}>{assessment.profile_complete ? "Edit" : "Complete"}</button></div>
+        <p class="settings-note">Your choices are saved on this device. FiberPulse will not ask again automatically.</p>
+      </section></div>}
    {showPermission && <MeasurementPermission firstRun={firstRun} busy={busy} error={actionError} onSave={granted => void saveMeasurementPermission(granted)} onClose={() => setPermissionOpen(false)} />}
 	    {planOpen && <PlanModal catalog={status.plan_catalog || []} current={planState?.offer} busy={busy} onSave={selection => void savePlan(selection)} onClose={() => setPlanOpen(false)} />}
 	    {profileOpen && <ProfileModal profile={complaint.profile} busy={busy} error={actionError} onSave={profile => void saveProfile(profile)} onClose={() => setProfileOpen(false)} />}
