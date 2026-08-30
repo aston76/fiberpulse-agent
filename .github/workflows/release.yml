@@ -173,12 +173,12 @@ jobs:
         shell: pwsh
         run: |
           $compiler = @(
-            "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
             "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $compiler) {
             choco install innosetup --no-progress -y
-            $compiler = "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
+            $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           }
           if (-not (Test-Path $compiler)) { throw 'Inno Setup 6 compiler is unavailable.' }
           "ISCC=$compiler" >> $env:GITHUB_ENV

@@ -60,12 +60,12 @@ cp LICENSE "$app_path/Contents/Resources/LICENSE"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app_path/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$app_path/Contents/Info.plist"
 if [ "$signing_identity" = "-" ]; then
-  codesign --force --sign - "$app_path/Contents/MacOS/fiberpulse"
   codesign --force --sign - "$app_path/Contents/MacOS/fiberpulse-updater"
+  codesign --force --sign - "$app_path/Contents/MacOS/fiberpulse"
   codesign --force --sign - "$app_path"
 else
-  codesign --force --options runtime --timestamp --sign "$signing_identity" "$app_path/Contents/MacOS/fiberpulse"
   codesign --force --options runtime --timestamp --sign "$signing_identity" "$app_path/Contents/MacOS/fiberpulse-updater"
+  codesign --force --options runtime --timestamp --sign "$signing_identity" "$app_path/Contents/MacOS/fiberpulse"
   codesign --force --options runtime --timestamp --sign "$signing_identity" "$app_path"
 fi
 codesign --verify --deep --strict "$app_path"
