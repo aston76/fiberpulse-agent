@@ -120,6 +120,24 @@ jobs:
           name: fiberpulse-windows-x64-development-setup
           path: dist/FiberPulse-0.1.0-dev-windows-x64-setup.exe
 
+  windows-msix:
+    needs: windows-x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: fiberpulse-windows-x64-development
+          path: dist
+      - name: Build and verify Microsoft Store MSIX
+        shell: pwsh
+        run: .\packaging\windows\build-msix.ps1 -Version 0.1.0.0
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: fiberpulse-windows-x64-store-msix
+          path: dist/FiberPulse-0.1.0.0-windows-x64.msix
+          if-no-files-found: error
+
   macos:
     strategy:
       matrix:

@@ -18,6 +18,17 @@ The resulting binaries are development artifacts. They are not approved for
 public distribution. A release workflow must apply Authenticode SHA-256 with an
 RFC 3161 timestamp to the agent, updater and final installer.
 
+## Microsoft Store package
+
+The Store edition is a separate MSIX package. It uses the identity assigned by
+Partner Center (`SEOWEBAPP.FiberPulse`) and is signed and updated by Microsoft
+after certification. It intentionally does not contain the standalone updater.
+
+CI builds and structurally verifies the development Store package on Windows.
+The exact artifact to upload in Partner Center is named
+`FiberPulse-0.1.0.0-windows-x64.msix`. The package must remain unsigned before
+Store upload; Microsoft applies the trusted Store signature during publishing.
+
 ## Shutdown contract
 
 `fiberpulse.exe --quit` signals the running per-user instance and waits up to ten
