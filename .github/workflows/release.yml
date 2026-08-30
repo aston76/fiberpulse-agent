@@ -12,6 +12,14 @@ on:
         required: true
         default: false
         type: boolean
+      distribution:
+        description: Publish the fully signed cross-platform release or the temporary manual macOS edition
+        required: true
+        default: macos-provisional
+        type: choice
+        options:
+          - macos-provisional
+          - full-signed
 
 permissions:
   contents: write
@@ -84,6 +92,7 @@ jobs:
           go vet ./...
 
   windows-build:
+    if: inputs.distribution == 'full-signed'
     needs: validate
     runs-on: ubuntu-latest
     steps:
@@ -111,6 +120,7 @@ jobs:
           retention-days: 1
 
   windows-sign-package:
+    if: inputs.distribution == 'full-signed'
     needs: [validate, windows-build]
     runs-on: windows-latest
     steps:
@@ -240,6 +250,7 @@ jobs:
           if-no-files-found: error
 
   macos-sign-notarize:
+    if: inputs.distribution == 'full-signed'
     needs: validate
     runs-on: macos-15
     steps:
@@ -318,7 +329,53 @@ jobs:
           path: dist/macos/FiberPulse-${{ needs.validate.outputs.version }}-macos.zip
           if-no-files-found: error
 
-  publish:
+  macos-provisional:
+    if: inputs.distribution == 'macos-provisional'
+    needs: validate
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.26.7
+          cache: true
+      - name: Build provisional universal application with public sharing enabled
+        env:
+          FIBERPULSE_VERSION: ${{ needs.validate.outputs.version }}
+          FIBERPULSE_BUILD_NUMBER: ${{ github.run_number }}
+          FIBERPULSE_SHARE_URL: ${{ vars.FIBERPULSE_SHARE_URL }}
+        run: sh packaging/macos/build-app.sh
+      - name: Verify provisional archive and keep automatic updates disabled
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="dist/macos/FiberPulse-${VERSION}-macos.zip"
+          app="dist/macos/FiberPulse.app"
+          test -n "${{ vars.FIBERPULSE_SHARE_URL }}"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          test "$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')" = "not set"
+          if spctl --assess --type execute "$app"; then
+            echo 'A provisional ad-hoc build must not be presented as Gatekeeper-approved.' >&2
+            exit 1
+          fi
+          rm -rf "$RUNNER_TEMP/fiberpulse-provisional-roundtrip"
+          ditto -x -k "$archive" "$RUNNER_TEMP/fiberpulse-provisional-roundtrip"
+          codesign --verify --deep --strict "$RUNNER_TEMP/fiberpulse-provisional-roundtrip/FiberPulse.app"
+          strings "$app/Contents/MacOS/fiberpulse" | grep -F 'https://testspeednow.com/api/v1'
+          if strings "$app/Contents/MacOS/fiberpulse" | grep -F "$UPDATE_FEED_URL"; then
+            echo 'The provisional macOS build unexpectedly contains the automatic update feed.' >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: provisional-macos-release
+          path: dist/macos/FiberPulse-${{ needs.validate.outputs.version }}-macos.zip
+          if-no-files-found: error
+
+  publish-full:
+    if: inputs.distribution == 'full-signed'
     needs: [validate, windows-sign-package, macos-sign-notarize]
     runs-on: ubuntu-latest
     steps:
@@ -366,6 +423,7 @@ jobs:
           rm -f "$key_path"
           cp "release/FiberPulse-${VERSION}-windows-x64-setup.exe" release/FiberPulse-windows-x64-setup.exe
           cp "$mac_archive" release/FiberPulse-macos-universal.zip
+          printf 'Developer ID signed, Apple notarized and Gatekeeper accepted.\n' > release/FiberPulse-macos-universal.notarized.txt
           (cd release && sha256sum ./* > SHA256SUMS)
       - name: Publish immutable GitHub release
         env:
@@ -389,4 +447,49 @@ jobs:
           else
             publish_flags+=(--latest)
           fi
+          gh release edit "v$VERSION" "${publish_flags[@]}"
+
+  publish-macos-provisional:
+    if: inputs.distribution == 'macos-provisional'
+    needs: [validate, macos-provisional]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: provisional-macos-release
+          path: release
+      - name: Stage manual macOS download and checksums
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="release/FiberPulse-${VERSION}-macos.zip"
+          test -s "$archive"
+          cp "$archive" release/FiberPulse-macos-universal.zip
+          cat > release/FiberPulse-macos-installation.txt <<'EOF'
+          FiberPulse for macOS 13 or later — temporary manual edition
+
+          This universal Apple Silicon + Intel build is ad-hoc signed and is NOT
+          notarized by Apple. Automatic updates are disabled. Move FiberPulse.app
+          to Applications, try to open it, then use System Settings > Privacy &
+          Security > Open Anyway. Never disable Gatekeeper globally.
+          EOF
+          (cd release && sha256sum ./* > SHA256SUMS)
+      - name: Publish immutable manual macOS release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          prerelease_flag=()
+          if [ "$PRERELEASE" = "true" ]; then prerelease_flag+=(--prerelease); fi
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --draft \
+            --title "FiberPulse $VERSION" \
+            --notes "Temporary manual macOS 13+ release for Apple Silicon and Intel. This build is ad-hoc signed, not Apple-notarized, and does not enable automatic updates. Follow FiberPulse-macos-installation.txt and verify SHA256SUMS. Windows remains unavailable until its Authenticode certificate and Store certification are complete." \
+            "${prerelease_flag[@]}"
+          gh release upload "v$VERSION" release/*
+          gh release view "v$VERSION" --json assets,isDraft,tagName
+          publish_flags=(--draft=false)
+          if [ "$PRERELEASE" = "true" ]; then publish_flags+=(--prerelease); else publish_flags+=(--latest); fi
           gh release edit "v$VERSION" "${publish_flags[@]}"

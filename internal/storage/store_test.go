@@ -129,6 +129,49 @@ func TestSharingRevocationAtomicallyPurgesQueue(t *testing.T) {
 	}
 }
 
+func TestCurrentConsentUsesInsertionOrderWhenTimestampsMatch(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	at := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+	if err := s.SetConsent(ctx, Consent{Scope: "fiberpulse", Granted: true, PolicyVersion: "privacy-v1", OccurredAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetConsent(ctx, Consent{Scope: "fiberpulse", Granted: false, PolicyVersion: "privacy-v1", OccurredAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	consent, err := s.CurrentConsent(ctx, "fiberpulse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consent.Granted {
+		t.Fatal("equal-timestamp revocation was hidden by the older grant")
+	}
+}
+
+func TestNewShareIsDueEvenIfWallClockMovesBackwards(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	future := time.Date(2026, 8, 31, 1, 0, 0, 0, time.UTC)
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO share_queue(id,event_type,payload_json,created_at,next_attempt_at) VALUES(?,?,?,?,?)`, "clock-step", "measurement", `{}`, formatTime(future), formatTime(future)); err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.DueShares(ctx, future.Add(-time.Second), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != "clock-step" {
+		t.Fatalf("new item was deferred by a backwards clock step: %+v", items)
+	}
+}
+
 func TestSharingRevocationRollsBackWhenQueuePurgeFails(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "fiberpulse.db"))

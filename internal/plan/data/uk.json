@@ -283,6 +283,71 @@
       "note": "Published average download; promotional price rotates frequently, verify on source page.",
       "source_url": "https://www.talktalk.co.uk/broadband",
       "verified_at": "2026-08-30"
+    },
+    {
+      "id": "plusnet-full-fibre-74",
+      "country_code": "GB",
+      "country_name": "United Kingdom",
+      "isp": "Plusnet",
+      "name": "Full Fibre 74",
+      "download_mbps": 74,
+      "upload_mbps": 0,
+      "category": "Fiber (Openreach)",
+      "note": "Published average download; the address-specific checkout provides the price and guaranteed speed.",
+      "source_url": "https://www.plus.net/broadband/full-fibre/",
+      "verified_at": "2026-08-31"
+    },
+    {
+      "id": "plusnet-full-fibre-145",
+      "country_code": "GB",
+      "country_name": "United Kingdom",
+      "isp": "Plusnet",
+      "name": "Full Fibre 145",
+      "download_mbps": 145,
+      "upload_mbps": 0,
+      "category": "Fiber (Openreach)",
+      "note": "Published average download; the address-specific checkout provides the price and guaranteed speed.",
+      "source_url": "https://www.plus.net/broadband/full-fibre/",
+      "verified_at": "2026-08-31"
+    },
+    {
+      "id": "plusnet-full-fibre-300",
+      "country_code": "GB",
+      "country_name": "United Kingdom",
+      "isp": "Plusnet",
+      "name": "Full Fibre 300",
+      "download_mbps": 300,
+      "upload_mbps": 0,
+      "category": "Fiber (Openreach)",
+      "note": "Published average download; the address-specific checkout provides the price and guaranteed speed.",
+      "source_url": "https://www.plus.net/broadband/full-fibre/",
+      "verified_at": "2026-08-31"
+    },
+    {
+      "id": "plusnet-full-fibre-500",
+      "country_code": "GB",
+      "country_name": "United Kingdom",
+      "isp": "Plusnet",
+      "name": "Full Fibre 500",
+      "download_mbps": 500,
+      "upload_mbps": 0,
+      "category": "Fiber (Openreach)",
+      "note": "Published average download; the address-specific checkout provides the price and guaranteed speed.",
+      "source_url": "https://www.plus.net/broadband/full-fibre/",
+      "verified_at": "2026-08-31"
+    },
+    {
+      "id": "plusnet-full-fibre-900",
+      "country_code": "GB",
+      "country_name": "United Kingdom",
+      "isp": "Plusnet",
+      "name": "Full Fibre 900",
+      "download_mbps": 900,
+      "upload_mbps": 0,
+      "category": "Fiber (Openreach)",
+      "note": "Published average download; the address-specific checkout provides the price and guaranteed speed.",
+      "source_url": "https://www.plus.net/broadband/full-fibre/",
+      "verified_at": "2026-08-31"
     }
   ]
 }

@@ -255,7 +255,10 @@ func (s *Store) CurrentConsent(ctx context.Context, scope string) (Consent, erro
 	var c Consent
 	var granted int
 	var occurred string
-	err := s.db.QueryRowContext(ctx, `SELECT scope,granted,policy_version,language,source,occurred_at FROM consent_events WHERE scope=? ORDER BY occurred_at DESC LIMIT 1`, scope).
+	// Consent changes are local append-only actions. The SQLite insertion order is
+	// authoritative because wall clocks can have coarse resolution or move slightly
+	// backwards; ordering by time could otherwise resurrect an older grant.
+	err := s.db.QueryRowContext(ctx, `SELECT scope,granted,policy_version,language,source,occurred_at FROM consent_events WHERE scope=? ORDER BY rowid DESC LIMIT 1`, scope).
 		Scan(&c.Scope, &granted, &c.PolicyVersion, &c.Language, &c.Source, &occurred)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Consent{Scope: scope}, nil
@@ -324,7 +327,7 @@ func (s *Store) DueShares(ctx context.Context, now time.Time, limit int) ([]Shar
 		return nil, errors.New("share queue limit must be between 1 and 100")
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id,event_type,payload_json,created_at,next_attempt_at,attempt_count
-		FROM share_queue WHERE next_attempt_at <= ? ORDER BY created_at LIMIT ?`, formatTime(now), limit)
+		FROM share_queue WHERE attempt_count=0 OR next_attempt_at <= ? ORDER BY created_at LIMIT ?`, formatTime(now), limit)
 	if err != nil {
 		return nil, err
 	}

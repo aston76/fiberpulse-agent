@@ -771,13 +771,13 @@ func TestSubscriberProfileAndComplaintPackage(t *testing.T) {
 
 	ph := time.FixedZone("PHT", 8*60*60)
 	nowLocal := time.Now().In(ph)
-	endDay := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, ph)
-	if nowLocal.Hour() < 3 {
-		endDay = endDay.AddDate(0, 0, -1)
-	}
+	// Keep every sample inside the rolling seven-day window while still
+	// spanning seven local calendar dates. Anchoring at midnight made the
+	// oldest samples expire progressively as the test ran later in the day.
+	endDay := nowLocal.Add(-3 * time.Hour)
 	for day := 0; day < complaint.TargetDays; day++ {
 		for sample := 0; sample < 3; sample++ {
-			started := endDay.AddDate(0, 0, -(complaint.TargetDays - 1 - day)).Add(time.Duration(sample)*time.Hour + 15*time.Minute).UTC()
+			started := endDay.AddDate(0, 0, -(complaint.TargetDays - 1 - day)).Add(time.Duration(sample) * time.Hour).UTC()
 			result := measurement.Result{
 				ID: fmt.Sprintf("complaint-%d-%d", day, sample), Provider: measurement.ProviderMLabNDT7,
 				ProtocolVersion: "ndt7", ClientVersion: "test", SchemaVersion: measurement.SchemaVersion,

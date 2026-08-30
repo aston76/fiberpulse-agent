@@ -37,9 +37,9 @@ type Offer struct {
 	Custom       bool    `json:"custom,omitempty"`
 	DayMbps      int     `json:"day_mbps,omitempty"`
 	NightMbps    int     `json:"night_mbps,omitempty"`
-	// AdvertisedSpeedBasis records how the plan speed is legally marketed:
-	// "up_to" (US, PH and most markets), "average" (UK Ofcom rule) or
-	// "typical" (fixed-wireless ranges). The UI words comparisons accordingly.
+	// AdvertisedSpeedBasis records how the source offer states its headline
+	// speed: "up_to", "average" or "typical". It controls comparison wording
+	// only and must never be presented as a legal threshold.
 	AdvertisedSpeedBasis string `json:"advertised_speed_basis,omitempty"`
 }
 
