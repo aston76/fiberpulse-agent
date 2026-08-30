@@ -43,11 +43,82 @@ jobs:
       - name: Extract artifacts
         run: mkdir -p dist && docker run --rm -v "$PWD/dist:/artifacts" fiberpulse-agent-build
       - name: Record checksums
-        run: sha256sum dist/*.exe > dist/SHA256SUMS
+        run: |
+          objdump -p dist/fiberpulse.exe | grep -F "Windows GUI"
+          objdump -p dist/fiberpulse-updater.exe | grep -F "Windows GUI"
+          sha256sum dist/*.exe > dist/SHA256SUMS
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: fiberpulse-windows-x64-development
           path: dist/
+
+  windows-setup:
+    needs: windows-x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: fiberpulse-windows-x64-development
+          path: dist
+      - name: Locate Inno Setup compiler
+        shell: pwsh
+        run: |
+          $compiler = @(
+            "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $compiler) {
+            choco install innosetup --no-progress -y
+            $compiler = "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $compiler)) {
+            throw 'Inno Setup 6 compiler is unavailable.'
+          }
+          "ISCC=$compiler" >> $env:GITHUB_ENV
+      - name: Compile development setup
+        shell: pwsh
+        run: |
+          & "$env:ISCC" "/DMyAppVersion=0.1.0-dev" "/DMyAppVersionInfo=0.1.0.0" "packaging\windows\fiberpulse.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
+          }
+      - name: Install, run, quit and uninstall exact setup
+        shell: pwsh
+        run: |
+          $installer = Resolve-Path 'dist\FiberPulse-0.1.0-dev-windows-x64-setup.exe'
+          $installDir = Join-Path $env:RUNNER_TEMP 'FiberPulsePackageQA'
+          $dataDir = Join-Path $env:RUNNER_TEMP 'FiberPulseDataQA'
+          $install = Start-Process -FilePath $installer -ArgumentList @(
+            '/CURRENTUSER', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
+            '/MERGETASKS="!autostart"', "/DIR=$installDir"
+          ) -PassThru -Wait
+          if ($install.ExitCode -ne 0) {
+            throw "Installer exited with code $($install.ExitCode)."
+          }
+          foreach ($required in @('fiberpulse.exe', 'fiberpulse-updater.exe', 'FiberPulse.ico', 'LICENSE', 'unins000.exe')) {
+            if (-not (Test-Path (Join-Path $installDir $required))) {
+              throw "Installed package is missing $required."
+            }
+          }
+          $env:FIBERPULSE_DATA_DIR = $dataDir
+          $agent = Start-Process -FilePath (Join-Path $installDir 'fiberpulse.exe') -ArgumentList '--background' -PassThru
+          Start-Sleep -Seconds 4
+          if ($agent.HasExited) {
+            throw "Installed FiberPulse exited early with code $($agent.ExitCode)."
+          }
+          $quit = Start-Process -FilePath (Join-Path $installDir 'fiberpulse.exe') -ArgumentList '--quit' -PassThru -Wait
+          if ($quit.ExitCode -ne 0 -or -not $agent.WaitForExit(10000)) {
+            throw 'Installed FiberPulse did not shut down cleanly.'
+          }
+          $uninstall = Start-Process -FilePath (Join-Path $installDir 'unins000.exe') -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -PassThru -Wait
+          if ($uninstall.ExitCode -ne 0 -or (Test-Path $installDir)) {
+            throw 'FiberPulse did not uninstall cleanly.'
+          }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: fiberpulse-windows-x64-development-setup
+          path: dist/FiberPulse-0.1.0-dev-windows-x64-setup.exe
 
   macos:
     strategy:

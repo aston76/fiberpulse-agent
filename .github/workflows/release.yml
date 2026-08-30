@@ -1,0 +1,392 @@
+name: Signed release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version without a leading v, for example 1.0.0
+        required: true
+        type: string
+      prerelease:
+        description: Publish as a prerelease instead of the latest stable release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fiberpulse-release
+  cancel-in-progress: false
+
+env:
+  UPDATE_FEED_URL: https://github.com/aston76/fiberpulse-agent/releases/latest/download
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      version_info: ${{ steps.release.outputs.version_info }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: Validate immutable release inputs
+        id: release
+        env:
+          VERSION: ${{ inputs.version }}
+          UPDATE_PUBLIC_KEY: ${{ vars.FIBERPULSE_UPDATE_PUBLIC_KEY }}
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Signed releases must run from main." >&2
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "version must be valid SemVer without a leading v or build metadata." >&2
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          patch="${BASH_REMATCH[3]}"
+          for component in "$major" "$minor" "$patch"; do
+            if (( component > 65535 )); then
+              echo "version components must fit Windows version resources." >&2
+              exit 1
+            fi
+          done
+          if [[ ! "$UPDATE_PUBLIC_KEY" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "FIBERPULSE_UPDATE_PUBLIC_KEY must be a 32-byte lowercase hexadecimal repository variable." >&2
+            exit 1
+          fi
+          if git rev-parse --verify --quiet "refs/tags/v$VERSION"; then
+            echo "tag v$VERSION already exists; releases are immutable." >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_info=$major.$minor.$patch.0" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.26.7
+          cache: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Test the exact release source
+        run: |
+          npm --prefix dashboard ci
+          npm --prefix dashboard run build
+          diff -r dashboard/dist internal/localapi/web
+          go test ./...
+          go vet ./...
+
+  windows-build:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Build native Windows binaries
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          UPDATE_PUBLIC_KEY: ${{ vars.FIBERPULSE_UPDATE_PUBLIC_KEY }}
+          SHARE_URL: ${{ vars.FIBERPULSE_SHARE_URL }}
+        run: |
+          docker build -f packaging/windows/Dockerfile.build \
+            --build-arg "VERSION=$VERSION" \
+            --build-arg "SHARE_URL=$SHARE_URL" \
+            --build-arg "UPDATE_FEED_URL=$UPDATE_FEED_URL" \
+            --build-arg "UPDATE_PUBLIC_KEY=$UPDATE_PUBLIC_KEY" \
+            -t fiberpulse-release-windows .
+          mkdir -p dist
+          docker run --rm -v "$PWD/dist:/artifacts" fiberpulse-release-windows
+          objdump -p dist/fiberpulse.exe | grep -F "Windows GUI"
+          objdump -p dist/fiberpulse-updater.exe | grep -F "Windows GUI"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: unsigned-windows-release-input
+          path: dist/*.exe
+          retention-days: 1
+
+  windows-sign-package:
+    needs: [validate, windows-build]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unsigned-windows-release-input
+          path: dist
+      - name: Import the Authenticode certificate
+        id: certificate
+        shell: pwsh
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CERTIFICATE_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:CERTIFICATE_PASSWORD) -or
+              [string]::IsNullOrWhiteSpace($env:TIMESTAMP_URL)) {
+            throw 'Windows signing certificate, password and timestamp URL are required.'
+          }
+          $timestamp = [Uri]$env:TIMESTAMP_URL
+          if (-not $timestamp.IsAbsoluteUri -or $timestamp.Scheme -notin @('http', 'https')) {
+            throw 'WINDOWS_TIMESTAMP_URL must be an absolute HTTP(S) RFC 3161 endpoint.'
+          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'fiberpulse-signing.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CERTIFICATE_BASE64))
+          $password = ConvertTo-SecureString $env:CERTIFICATE_PASSWORD -AsPlainText -Force
+          $imported = @(Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation 'Cert:\CurrentUser\My' -Password $password)
+          Remove-Item -LiteralPath $pfxPath -Force
+          $certificate = $imported | Where-Object {
+            $_.HasPrivateKey -and ($_.EnhancedKeyUsageList.ObjectId.Value -contains '1.3.6.1.5.5.7.3.3')
+          } | Select-Object -First 1
+          if (-not $certificate) {
+            throw 'The imported PFX is not a code-signing certificate with a private key.'
+          }
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signTool) {
+            throw 'Windows SDK SignTool is unavailable.'
+          }
+          "SIGNTOOL=$($signTool.FullName)" >> $env:GITHUB_ENV
+          "CERT_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+      - name: Sign agent and updater with timestamping
+        shell: pwsh
+        env:
+          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          foreach ($binary in @('dist\fiberpulse.exe', 'dist\fiberpulse-updater.exe')) {
+            & "$env:SIGNTOOL" sign /sha1 "$env:CERT_THUMBPRINT" /fd SHA256 /tr "$env:TIMESTAMP_URL" /td SHA256 $binary
+            if ($LASTEXITCODE -ne 0) { throw "Signing failed for $binary." }
+            & "$env:SIGNTOOL" verify /pa /all /v $binary
+            if ($LASTEXITCODE -ne 0) { throw "Signature verification failed for $binary." }
+            $signature = Get-AuthenticodeSignature -FilePath $binary
+            if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate) {
+              throw "$binary does not have a valid timestamped Authenticode signature."
+            }
+          }
+      - name: Locate Inno Setup compiler
+        shell: pwsh
+        run: |
+          $compiler = @(
+            "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $compiler) {
+            choco install innosetup --no-progress -y
+            $compiler = "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $compiler)) { throw 'Inno Setup 6 compiler is unavailable.' }
+          "ISCC=$compiler" >> $env:GITHUB_ENV
+      - name: Compile timestamp-signed setup and uninstaller
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          VERSION_INFO: ${{ needs.validate.outputs.version_info }}
+          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $signCommand = "`"$env:SIGNTOOL`" sign /sha1 $env:CERT_THUMBPRINT /fd SHA256 /tr `"$env:TIMESTAMP_URL`" /td SHA256 `$f"
+          & "$env:ISCC" "/DMyAppVersion=$env:VERSION" "/DMyAppVersionInfo=$env:VERSION_INFO" "/DFiberPulseReleaseSigning=1" "/SFiberPulseSign=$signCommand" "packaging\windows\fiberpulse.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed with exit code $LASTEXITCODE." }
+      - name: Verify exact Windows installation lifecycle
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          $installer = Resolve-Path "dist\FiberPulse-$env:VERSION-windows-x64-setup.exe"
+          foreach ($signedFile in @($installer, (Resolve-Path 'dist\fiberpulse.exe'), (Resolve-Path 'dist\fiberpulse-updater.exe'))) {
+            $signature = Get-AuthenticodeSignature -FilePath $signedFile
+            if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate) {
+              throw "$signedFile is not validly signed and timestamped."
+            }
+          }
+          $installDir = Join-Path $env:RUNNER_TEMP 'FiberPulseReleaseQA'
+          $dataDir = Join-Path $env:RUNNER_TEMP 'FiberPulseReleaseDataQA'
+          $install = Start-Process -FilePath $installer -ArgumentList @('/CURRENTUSER', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/MERGETASKS="!autostart"', "/DIR=$installDir") -PassThru -Wait
+          if ($install.ExitCode -ne 0) { throw "Installer exited with code $($install.ExitCode)." }
+          foreach ($required in @('fiberpulse.exe', 'fiberpulse-updater.exe', 'FiberPulse.ico', 'LICENSE', 'unins000.exe')) {
+            $path = Join-Path $installDir $required
+            if (-not (Test-Path $path)) { throw "Installed package is missing $required." }
+            if ($required -like '*.exe') {
+              $signature = Get-AuthenticodeSignature -FilePath $path
+              if ($signature.Status -ne 'Valid') { throw "$required is not validly signed after installation." }
+            }
+          }
+          $env:FIBERPULSE_DATA_DIR = $dataDir
+          $agent = Start-Process -FilePath (Join-Path $installDir 'fiberpulse.exe') -ArgumentList '--background' -PassThru
+          Start-Sleep -Seconds 4
+          if ($agent.HasExited) { throw "Installed FiberPulse exited early with code $($agent.ExitCode)." }
+          $quit = Start-Process -FilePath (Join-Path $installDir 'fiberpulse.exe') -ArgumentList '--quit' -PassThru -Wait
+          if ($quit.ExitCode -ne 0 -or -not $agent.WaitForExit(10000)) { throw 'Installed FiberPulse did not shut down cleanly.' }
+          $uninstall = Start-Process -FilePath (Join-Path $installDir 'unins000.exe') -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -PassThru -Wait
+          if ($uninstall.ExitCode -ne 0 -or (Test-Path $installDir)) { throw 'FiberPulse did not uninstall cleanly.' }
+      - name: Stage signed Windows release assets
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Copy-Item "dist\FiberPulse-$env:VERSION-windows-x64-setup.exe" "release\FiberPulse-$env:VERSION-windows-x64-setup.exe"
+          Copy-Item 'dist\fiberpulse.exe' "release\FiberPulse-$env:VERSION-windows-x64-agent.exe"
+          Copy-Item 'dist\fiberpulse-updater.exe' "release\FiberPulse-$env:VERSION-windows-x64-updater.exe"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: signed-windows-release
+          path: release/*
+          if-no-files-found: error
+
+  macos-sign-notarize:
+    needs: validate
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.26.7
+          cache: true
+      - name: Import Developer ID certificate and App Store Connect key
+        shell: bash
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          for value in CERTIFICATE_BASE64 CERTIFICATE_PASSWORD SIGNING_IDENTITY APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER_ID; do
+            if [ -z "${!value}" ]; then
+              echo "$value is required for a notarized macOS release." >&2
+              exit 1
+            fi
+          done
+          keychain_path="$RUNNER_TEMP/fiberpulse-signing.keychain-db"
+          keychain_password="$(uuidgen | tr -d '-')"
+          certificate_path="$RUNNER_TEMP/fiberpulse-signing.p12"
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 -D > "$api_key_path"
+          chmod 600 "$certificate_path" "$api_key_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path" login.keychain-db
+          security find-identity -v -p codesigning "$keychain_path" | grep -F "$SIGNING_IDENTITY"
+          rm -f "$certificate_path"
+          {
+            echo "FIBERPULSE_KEYCHAIN_PATH=$keychain_path"
+            echo "FIBERPULSE_SIGNING_IDENTITY=$SIGNING_IDENTITY"
+            echo "FIBERPULSE_NOTARY_KEY_PATH=$api_key_path"
+          } >> "$GITHUB_ENV"
+      - name: Build hardened universal application
+        env:
+          FIBERPULSE_VERSION: ${{ needs.validate.outputs.version }}
+          FIBERPULSE_BUILD_NUMBER: ${{ github.run_number }}
+          FIBERPULSE_SHARE_URL: ${{ vars.FIBERPULSE_SHARE_URL }}
+          FIBERPULSE_UPDATE_FEED_URL: ${{ env.UPDATE_FEED_URL }}
+          FIBERPULSE_UPDATE_PUBLIC_KEY: ${{ vars.FIBERPULSE_UPDATE_PUBLIC_KEY }}
+          FIBERPULSE_CODESIGN_IDENTITY: ${{ env.FIBERPULSE_SIGNING_IDENTITY }}
+        run: sh packaging/macos/build-app.sh
+      - name: Notarize, staple and assess with Gatekeeper
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          archive="dist/macos/FiberPulse-${VERSION}-macos.zip"
+          app="dist/macos/FiberPulse.app"
+          xcrun notarytool submit "$archive" --key "$FIBERPULSE_NOTARY_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose=2 "$app"
+          rm -f "$archive"
+          ditto -c -k --keepParent "$app" "$archive"
+          ditto -x -k "$archive" "$RUNNER_TEMP/fiberpulse-notary-roundtrip"
+          codesign --verify --deep --strict "$RUNNER_TEMP/fiberpulse-notary-roundtrip/FiberPulse.app"
+          spctl --assess --type execute "$RUNNER_TEMP/fiberpulse-notary-roundtrip/FiberPulse.app"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: signed-notarized-macos-release
+          path: dist/macos/FiberPulse-${{ needs.validate.outputs.version }}-macos.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [validate, windows-sign-package, macos-sign-notarize]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.26.7
+          cache: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: signed-windows-release
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: signed-notarized-macos-release
+          path: release
+      - name: Sign update feeds and stage stable download aliases
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          UPDATE_PRIVATE_KEY: ${{ secrets.FIBERPULSE_UPDATE_SIGNING_KEY }}
+          UPDATE_PUBLIC_KEY: ${{ vars.FIBERPULSE_UPDATE_PUBLIC_KEY }}
+          SEQUENCE: ${{ github.run_number }}
+        run: |
+          if [[ ! "$UPDATE_PRIVATE_KEY" =~ ^[0-9a-f]{128}$ ]]; then
+            echo "FIBERPULSE_UPDATE_SIGNING_KEY must be a 64-byte lowercase hexadecimal secret." >&2
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/fiberpulse-update-signing-key"
+          printf '%s' "$UPDATE_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          windows_agent="release/FiberPulse-${VERSION}-windows-x64-agent.exe"
+          mac_archive="release/FiberPulse-${VERSION}-macos.zip"
+          go run ./cmd/release-sign sign \
+            -version "$VERSION" -channel stable -sequence "$SEQUENCE" \
+            -artifact "$windows_agent" \
+            -url "https://github.com/aston76/fiberpulse-agent/releases/download/v${VERSION}/FiberPulse-${VERSION}-windows-x64-agent.exe" \
+            -key-file "$key_path" -expected-public-key "$UPDATE_PUBLIC_KEY" \
+            -ttl 8760h -out release/latest-windows-x64.json
+          go run ./cmd/release-sign sign \
+            -version "$VERSION" -channel stable -sequence "$SEQUENCE" \
+            -artifact "$mac_archive" \
+            -url "https://github.com/aston76/fiberpulse-agent/releases/download/v${VERSION}/FiberPulse-${VERSION}-macos.zip" \
+            -key-file "$key_path" -expected-public-key "$UPDATE_PUBLIC_KEY" \
+            -ttl 8760h -out release/latest-macos-universal.json
+          rm -f "$key_path"
+          cp "release/FiberPulse-${VERSION}-windows-x64-setup.exe" release/FiberPulse-windows-x64-setup.exe
+          cp "$mac_archive" release/FiberPulse-macos-universal.zip
+          (cd release && sha256sum ./* > SHA256SUMS)
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          prerelease_flag=()
+          if [ "$PRERELEASE" = "true" ]; then
+            prerelease_flag+=(--prerelease)
+          fi
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --draft \
+            --title "FiberPulse $VERSION" \
+            --notes "Signed FiberPulse desktop release for Windows 10/11 x64 and macOS 13+ on Apple Silicon or Intel. Includes automatic signed updates, local-first measurement history, diagnostics and PDF reports. Verify downloads with SHA256SUMS." \
+            "${prerelease_flag[@]}"
+          gh release upload "v$VERSION" release/*
+          gh release view "v$VERSION" --json assets,isDraft,tagName
+          publish_flags=(--draft=false)
+          if [ "$PRERELEASE" = "true" ]; then
+            publish_flags+=(--prerelease)
+          else
+            publish_flags+=(--latest)
+          fi
+          gh release edit "v$VERSION" "${publish_flags[@]}"

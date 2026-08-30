@@ -1,7 +1,9 @@
 # Windows distribution
 
-The MVP is installed per user in `%LocalAppData%\Programs\FiberPulse`. It does
-not require administrator privileges and creates one Task Scheduler logon task.
+FiberPulse is installed per user in `%LocalAppData%\Programs\FiberPulse`. It
+does not require administrator privileges. The optional start-at-login setting
+uses the current user's standard `Run` registry entry and is removed by the
+uninstaller.
 
 ## Development build
 
@@ -25,7 +27,8 @@ SQLite work is flushed, the loopback server is stopped and the tray is removed.
 
 ## Installer gate
 
-The Inno Setup source is ready for CI validation, but a commercial Inno Setup
-licence and a recognised Windows signing path remain release blockers. The
-uninstaller asks separately before deleting local data; keeping data is the
-default.
+CI compiles and silently installs the Inno Setup package to verify the exact
+files shipped to users. Public release remains blocked unless the agent,
+updater and final installer all carry a valid Authenticode signature and RFC
+3161 timestamp. The uninstaller asks separately before deleting local data;
+keeping data is the default.

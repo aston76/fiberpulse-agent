@@ -27,6 +27,7 @@ import (
 	"fiberpulse.dev/agent/internal/sharing"
 	"fiberpulse.dev/agent/internal/sponsor"
 	"fiberpulse.dev/agent/internal/storage"
+	"fiberpulse.dev/agent/internal/update"
 	"github.com/google/uuid"
 )
 
@@ -71,6 +72,7 @@ type Config struct {
 	SharingTransport        sharing.Sender
 	Logger                  *slog.Logger
 	Sponsor                 sponsor.Offer
+	Update                  *UpdateConfig
 }
 
 type App struct {
@@ -101,6 +103,11 @@ type App struct {
 	testMu       sync.Mutex
 	testKind     scheduler.Kind
 	testProgress measurement.Progress
+	updateClient *update.Client
+	updateConfig *UpdateConfig
+	updateNow    func() time.Time
+	updateMu     sync.Mutex
+	updateStatus UpdateStatus
 	wg           sync.WaitGroup
 	closing      bool
 	closeOnce    sync.Once
@@ -139,6 +146,7 @@ type Snapshot struct {
 	Reports           []reporting.Record    `json:"reports"`
 	Sponsor           *sponsor.Offer        `json:"sponsor,omitempty"`
 	LastError         string                `json:"last_error,omitempty"`
+	Update            UpdateStatus          `json:"update"`
 }
 
 type persistedIncidentRuntime struct {
@@ -214,6 +222,11 @@ func New(config Config) (*App, error) {
 			return nil, fmt.Errorf("restore connectivity machine: %w", err)
 		}
 	}
+	if err := a.configureUpdates(config.Update); err != nil {
+		cancel()
+		_ = store.Close()
+		return nil, fmt.Errorf("configure automatic updates: %w", err)
+	}
 	return a, nil
 }
 
@@ -254,6 +267,9 @@ func (a *App) Start() (string, error) {
 	a.runAsync(a.healthLoop)
 	a.runAsync(a.schedulerLoop)
 	a.runAsync(a.retentionLoop)
+	if a.updateClient != nil {
+		a.runAsync(a.updateLoop)
+	}
 	if a.config.SharingTransport != nil {
 		a.runAsync(a.sharingLoop)
 	}
@@ -345,6 +361,7 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 	a.connectMu.Lock()
 	connectivityState := a.connectivity.State()
 	a.connectMu.Unlock()
+	updateStatus := a.currentUpdateStatus()
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	var progress *measurement.Progress
@@ -357,7 +374,7 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 		copy := a.config.Sponsor
 		sponsorOffer = &copy
 	}
-	return Snapshot{TestProgress: progress, Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), ConnectivityState: string(connectivityState), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Plan: planState, Complaint: complaintState, PlanCatalog: plan.Catalog(), Incidents: recentIncidents, Reports: recentReports, Sponsor: sponsorOffer, LastError: a.lastError}, nil
+	return Snapshot{TestProgress: progress, Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), ConnectivityState: string(connectivityState), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Plan: planState, Complaint: complaintState, PlanCatalog: plan.Catalog(), Incidents: recentIncidents, Reports: recentReports, Sponsor: sponsorOffer, LastError: a.lastError, Update: updateStatus}, nil
 }
 
 func (a *App) currentComplaint(ctx context.Context, results []measurement.Result, planState *PlanState, now time.Time) (ComplaintState, error) {
@@ -418,6 +435,8 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 	switch name {
 	case "test":
 		return a.StartTest(ctx, scheduler.Manual)
+	case "update-check":
+		return a.CheckForUpdate(ctx)
 	case "pause":
 		var body struct {
 			Paused bool `json:"paused"`
@@ -877,6 +896,9 @@ func (a *App) StartTest(ctx context.Context, kind scheduler.Kind) error {
 	if busy {
 		return ErrMeasurementBusy
 	}
+	if a.updateBusy() {
+		return ErrUpdateInProgress
+	}
 	networkContext, err := a.inspector.Snapshot()
 	if err != nil {
 		return fmt.Errorf("unable to verify the active network before testing: %w", err)
@@ -1273,6 +1295,9 @@ func (a *App) handleAutomaticStartFailure(cause error, now time.Time) {
 	case errors.Is(cause, scheduler.ErrAutomaticQuota) || errors.Is(cause, scheduler.ErrTotalQuota):
 		target = scheduler.BlockedQuota
 	case errors.Is(cause, ErrMeasurementBusy):
+		target = scheduler.DeferredBusy
+		next = now.Add(5 * time.Minute)
+	case errors.Is(cause, ErrUpdateInProgress):
 		target = scheduler.DeferredBusy
 		next = now.Add(5 * time.Minute)
 	}

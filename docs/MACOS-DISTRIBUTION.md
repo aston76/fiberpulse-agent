@@ -16,10 +16,11 @@ packaging/macos/build-app.sh
 
 The script cross-builds both `arm64` and `x86_64`, combines them with `lipo`,
 then creates an ad-hoc-signed universal `.app` and ZIP for internal testing.
-Public distribution remains blocked until a Developer ID Application certificate,
-hardened-runtime signing, notarization and stapling are configured. An ad-hoc
-signature is never presented as a public release signature.
+The release workflow can switch to hardened-runtime Developer ID signing.
+Public distribution remains blocked until the resulting archive is notarized,
+stapled and accepted by Gatekeeper. An ad-hoc signature is never presented as
+a public release signature.
 
-The optional LaunchAgent template restarts only after a crash. A normal Quit is
-not restarted. Its executable and log placeholders must be replaced by the
-installer with absolute per-user paths.
+The one-line installer installs the bundled LaunchAgent for start-at-login. It
+restarts only after a crash; a normal Quit is not restarted. The installer
+replaces the executable and log placeholders with absolute per-user paths.

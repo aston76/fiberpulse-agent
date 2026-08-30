@@ -11,10 +11,12 @@ COPY . .
 
 ARG VERSION=0.1.0-dev
 ARG SHARE_URL=
+ARG UPDATE_FEED_URL=
+ARG UPDATE_PUBLIC_KEY=
 RUN mkdir -p /out \
     && GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
-       go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION} -X main.sharingEndpoint=${SHARE_URL}" -o /out/fiberpulse.exe ./cmd/fiberpulse \
+       go build -trimpath -buildvcs=false -ldflags="-s -w -H=windowsgui -X main.version=${VERSION} -X main.sharingEndpoint=${SHARE_URL} -X main.updateFeedURL=${UPDATE_FEED_URL} -X main.updatePublicKey=${UPDATE_PUBLIC_KEY}" -o /out/fiberpulse.exe ./cmd/fiberpulse \
     && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-       go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/fiberpulse-updater.exe ./cmd/fiberpulse-updater
+       go build -trimpath -buildvcs=false -ldflags="-s -w -H=windowsgui" -o /out/fiberpulse-updater.exe ./cmd/fiberpulse-updater
 
 ENTRYPOINT ["/bin/sh", "-c", "cp /out/*.exe /artifacts/"]

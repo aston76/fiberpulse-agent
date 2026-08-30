@@ -11,7 +11,7 @@ fail() {
   exit 1
 }
 
-for REQUIRED_TOOL in curl awk ditto codesign spctl; do
+for REQUIRED_TOOL in curl awk ditto codesign spctl plutil launchctl id install; do
   command -v "$REQUIRED_TOOL" >/dev/null 2>&1 || fail "required tool '$REQUIRED_TOOL' is unavailable."
 done
 
@@ -56,6 +56,26 @@ fi
 
 mkdir -p "$TARGET_DIR" || fail "could not create $TARGET_DIR."
 ditto "$SOURCE_APP" "$TARGET_APP" || fail "the application could not be installed."
-open "$TARGET_APP" || fail "FiberPulse was installed but could not be opened."
 
-echo "FiberPulse was installed in $TARGET_APP."
+LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
+LAUNCH_AGENT_PATH="$LAUNCH_AGENT_DIR/dev.fiberpulse.agent.plist"
+LOG_DIR="$HOME/Library/Logs/FiberPulse"
+LAUNCH_AGENT_TEMPLATE="$TARGET_APP/Contents/Resources/dev.fiberpulse.agent.plist"
+STAGED_LAUNCH_AGENT="$INSTALL_TEMP_DIR/dev.fiberpulse.agent.plist"
+[ -f "$LAUNCH_AGENT_TEMPLATE" ] || fail "the signed release is missing its start-at-login definition."
+mkdir -p "$LAUNCH_AGENT_DIR" "$LOG_DIR" || fail "the start-at-login directories could not be created."
+cp "$LAUNCH_AGENT_TEMPLATE" "$STAGED_LAUNCH_AGENT" || fail "the start-at-login definition could not be prepared."
+plutil -replace ProgramArguments.0 -string "$TARGET_APP/Contents/MacOS/fiberpulse" "$STAGED_LAUNCH_AGENT" || fail "the application launch path could not be configured."
+plutil -replace StandardOutPath -string "$LOG_DIR/launchd.stdout.log" "$STAGED_LAUNCH_AGENT" || fail "the output log path could not be configured."
+plutil -replace StandardErrorPath -string "$LOG_DIR/launchd.stderr.log" "$STAGED_LAUNCH_AGENT" || fail "the error log path could not be configured."
+plutil -lint "$STAGED_LAUNCH_AGENT" >/dev/null || fail "the start-at-login definition is invalid."
+install -m 600 "$STAGED_LAUNCH_AGENT" "$LAUNCH_AGENT_PATH" || fail "start-at-login could not be installed."
+
+LAUNCH_DOMAIN="gui/$(id -u)"
+launchctl bootout "$LAUNCH_DOMAIN/dev.fiberpulse.agent" >/dev/null 2>&1 || true
+if ! launchctl bootstrap "$LAUNCH_DOMAIN" "$LAUNCH_AGENT_PATH"; then
+  mv "$LAUNCH_AGENT_PATH" "$INSTALL_TEMP_DIR/failed-launch-agent.plist" 2>/dev/null || true
+  fail "FiberPulse was installed, but start-at-login could not be activated. Open it once from $TARGET_APP."
+fi
+
+echo "FiberPulse was installed in $TARGET_APP and will start automatically when you sign in."

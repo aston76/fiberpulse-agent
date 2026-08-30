@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/url"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -73,6 +74,54 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 	return nil
 }
 
+// Sign returns the canonical signed encoding of the manifest: the struct is
+// serialized without its signature, those exact compact bytes are signed with
+// the offline Ed25519 release key, and the signature is embedded before the
+// final encoding. loadManifest rejects anything that does not round-trip
+// through this exact construction.
+func Sign(manifest Manifest, privateKey ed25519.PrivateKey) ([]byte, error) {
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return nil, errors.New("invalid Ed25519 private key")
+	}
+	manifest.Signature = nil
+	unsigned, err := json.Marshal(manifest)
+	if err != nil {
+		return nil, fmt.Errorf("encode unsigned update manifest: %w", err)
+	}
+	manifest.Signature = ed25519.Sign(privateKey, unsigned)
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		return nil, fmt.Errorf("encode signed update manifest: %w", err)
+	}
+	return raw, nil
+}
+
+// FeedFileName maps a release platform identifier to the signed feed document
+// published as a GitHub release asset.
+func FeedFileName(platform string) (string, error) {
+	switch platform {
+	case "windows-x64":
+		return "latest-windows-x64.json", nil
+	case "macos-universal":
+		return "latest-macos-universal.json", nil
+	default:
+		return "", fmt.Errorf("unsupported update platform %q", platform)
+	}
+}
+
+// DefaultPlatform resolves the release platform identifier for the running
+// operating system.
+func DefaultPlatform() (string, error) {
+	switch runtime.GOOS {
+	case "windows":
+		return "windows-x64", nil
+	case "darwin":
+		return "macos-universal", nil
+	default:
+		return "", fmt.Errorf("automatic updates are unsupported on %s", runtime.GOOS)
+	}
+}
+
 func (m Manifest) validate(now time.Time, currentVersion, channel string, state State) error {
 	if _, err := parseSemanticVersion(m.Version); err != nil {
 		return fmt.Errorf("invalid update version: %w", err)
@@ -100,8 +149,12 @@ func (m Manifest) validate(now time.Time, currentVersion, channel string, state 
 		return errors.New("update artifact SHA-256 must be 64 lowercase hexadecimal characters")
 	}
 	parsedURL, err := url.Parse(m.URL)
-	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.User != nil {
-		return errors.New("update artifact URL must be an absolute HTTPS URL without credentials")
+	if err != nil || parsedURL.Host == "" || parsedURL.User != nil {
+		return errors.New("update artifact URL must be an absolute URL without credentials")
+	}
+	artifactHost := parsedURL.Hostname()
+	if parsedURL.Scheme != "https" && !(parsedURL.Scheme == "http" && (artifactHost == "127.0.0.1" || artifactHost == "localhost" || artifactHost == "::1")) {
+		return errors.New("update artifact URL must use HTTPS outside loopback")
 	}
 	if m.ExpiresAt.IsZero() || !now.Before(m.ExpiresAt) {
 		return errors.New("update manifest is expired")

@@ -1,6 +1,7 @@
 package update
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -12,22 +13,39 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
 type Options struct {
-	Target         string
-	Staged         string
-	ManifestPath   string
-	PublicKeyHex   string
-	StatePath      string
-	CurrentVersion string
-	Channel        string
-	HealthTimeout  time.Duration
-	Now            func() time.Time
-	VerifyPlatform func(string) error
+	Target             string
+	Staged             string
+	ManifestPath       string
+	PublicKeyHex       string
+	StatePath          string
+	CurrentVersion     string
+	Channel            string
+	Kind               Kind
+	Executable         string
+	WaitPID            int
+	WaitTimeout        time.Duration
+	HealthTimeout      time.Duration
+	SkipPlatformVerify bool
+	Now                func() time.Time
+	VerifyPlatform     func(string) error
+	ProcessAlive       func(int) bool
 }
+
+// Kind selects the replacement strategy. KindFile swaps a single regular
+// file (Windows agent). KindBundle swaps a complete macOS .app directory so
+// the bundle seal stays valid.
+type Kind string
+
+const (
+	KindFile   Kind = "file"
+	KindBundle Kind = "bundle"
+)
 
 type healthReceipt struct {
 	Version string `json:"version"`
@@ -54,6 +72,23 @@ func Apply(ctx context.Context, options Options) error {
 		verifyPlatform = options.VerifyPlatform
 	}
 
+	kind := options.Kind
+	if kind == "" {
+		kind = KindFile
+	}
+	executable := options.Executable
+	if kind == KindFile {
+		executable = options.Target
+	}
+	alive := defaultProcessAlive
+	if options.ProcessAlive != nil {
+		alive = options.ProcessAlive
+	}
+	waitTimeout := options.WaitTimeout
+	if waitTimeout == 0 {
+		waitTimeout = time.Minute
+	}
+
 	if err := verifyRegularFile(options.ManifestPath, "update manifest"); err != nil {
 		return err
 	}
@@ -72,16 +107,38 @@ func Apply(ctx context.Context, options Options) error {
 	if err := manifest.validate(now().UTC(), options.CurrentVersion, options.Channel, state); err != nil {
 		return err
 	}
-	if err := verifyRegularFile(options.Target, "installed agent"); err != nil {
+	if err := waitForProcessExit(ctx, options.WaitPID, alive, waitTimeout); err != nil {
 		return err
 	}
-	if err := verifyRegularFile(options.Staged, "staged agent"); err != nil {
+	if err := verifyTargetPath(options.Target, "installed agent", kind); err != nil {
+		return err
+	}
+	if err := verifyRegularFile(options.Staged, "staged agent archive"); err != nil {
 		return err
 	}
 	if err := verifyArtifact(options.Staged, manifest); err != nil {
 		return err
 	}
-	if err := verifyPlatform(options.Staged); err != nil {
+	installSource := options.Staged
+	extractRoot := ""
+	if kind == KindBundle {
+		relativeExecutable, relErr := filepath.Rel(options.Target, executable)
+		if relErr != nil {
+			return fmt.Errorf("resolve bundle executable location: %w", relErr)
+		}
+		extracted, root, extractErr := extractBundleArchive(options.Staged, filepath.Dir(options.Target), filepath.Base(options.Target), relativeExecutable)
+		if extractErr != nil {
+			return extractErr
+		}
+		extractRoot = root
+		defer os.RemoveAll(extractRoot)
+		installSource = extracted
+	}
+	if options.SkipPlatformVerify {
+		if kind == KindBundle {
+			return errors.New("platform signature verification cannot be skipped for a bundle update")
+		}
+	} else if err := verifyPlatform(installSource); err != nil {
 		return fmt.Errorf("verify staged platform signature: %w", err)
 	}
 
@@ -94,7 +151,7 @@ func Apply(ctx context.Context, options Options) error {
 	}
 	hadPrevious := false
 	if _, err := os.Lstat(backup); err == nil {
-		if err := verifyRegularFile(backup, "previous agent backup"); err != nil {
+		if err := verifyTargetPath(backup, "previous agent backup", kind); err != nil {
 			return err
 		}
 		if err := os.Rename(backup, retired); err != nil {
@@ -108,36 +165,36 @@ func Apply(ctx context.Context, options Options) error {
 		_ = restoreRetiredBackup(backup, retired, hadPrevious)
 		return fmt.Errorf("backup installed agent: %w", err)
 	}
-	if err := copyFileExclusive(options.Staged, options.Target); err != nil {
-		rollbackErr := restoreFiles(options.Target, backup, retired, hadPrevious)
+	if err := installStaged(installSource, options.Target, kind); err != nil {
+		rollbackErr := restoreFiles(options.Target, backup, retired, hadPrevious, kind)
 		return errors.Join(fmt.Errorf("install staged agent: %w", err), rollbackErr)
 	}
 
-	healthPath, err := reserveHealthPath(filepath.Dir(options.Target))
+	healthPath, err := reserveHealthPath(filepath.Dir(executable))
 	if err != nil {
-		rollbackErr := restoreFiles(options.Target, backup, retired, hadPrevious)
+		rollbackErr := restoreFiles(options.Target, backup, retired, hadPrevious, kind)
 		return errors.Join(err, rollbackErr)
 	}
 	defer os.Remove(healthPath)
-	process, err := startManagedProcess(options.Target, "--post-update", manifest.Version, "--update-health-file", healthPath)
+	process, err := startManagedProcess(executable, "--post-update", manifest.Version, "--update-health-file", healthPath)
 	if err != nil {
-		rollbackErr := rollbackAndRestart(options.Target, backup, retired, hadPrevious, manifest.Version, nil)
+		rollbackErr := rollbackAndRestart(executable, options.Target, backup, retired, hadPrevious, kind, manifest.Version, nil)
 		return errors.Join(fmt.Errorf("start updated agent: %w", err), rollbackErr)
 	}
 	if err := waitForHealth(ctx, process, healthPath, manifest.Version, options.HealthTimeout); err != nil {
-		rollbackErr := rollbackAndRestart(options.Target, backup, retired, hadPrevious, manifest.Version, process)
+		rollbackErr := rollbackAndRestart(executable, options.Target, backup, retired, hadPrevious, kind, manifest.Version, process)
 		return errors.Join(err, rollbackErr)
 	}
 	if hadPrevious {
-		if err := os.Remove(retired); err != nil {
-			rollbackErr := rollbackAndRestart(options.Target, backup, retired, true, manifest.Version, process)
+		if err := removeInstalledPath(retired, kind); err != nil {
+			rollbackErr := rollbackAndRestart(executable, options.Target, backup, retired, true, kind, manifest.Version, process)
 			return errors.Join(fmt.Errorf("remove retired update backup after successful health check: %w", err), rollbackErr)
 		}
 		hadPrevious = false
 	}
 	newState := State{HighestSequence: manifest.Sequence, Version: manifest.Version, UpdatedAt: now().UTC()}
 	if err := saveState(options.StatePath, newState); err != nil {
-		rollbackErr := rollbackAndRestart(options.Target, backup, retired, hadPrevious, manifest.Version, process)
+		rollbackErr := rollbackAndRestart(executable, options.Target, backup, retired, hadPrevious, kind, manifest.Version, process)
 		return errors.Join(fmt.Errorf("persist anti-rollback state: %w", err), rollbackErr)
 	}
 	return nil
@@ -149,6 +206,28 @@ func validateOptions(options Options) error {
 	}
 	if !filepath.IsAbs(options.Target) || !filepath.IsAbs(options.Staged) || !filepath.IsAbs(options.ManifestPath) || !filepath.IsAbs(options.StatePath) {
 		return errors.New("all updater paths must be absolute")
+	}
+	kind := options.Kind
+	if kind == "" {
+		kind = KindFile
+	}
+	if kind != KindFile && kind != KindBundle {
+		return errors.New("update kind must be file or bundle")
+	}
+	if kind == KindBundle {
+		if options.Executable == "" || !filepath.IsAbs(options.Executable) {
+			return errors.New("bundle updates require an absolute executable path inside the bundle")
+		}
+		relative, err := filepath.Rel(options.Target, options.Executable)
+		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return errors.New("bundle executable must live inside the installed bundle")
+		}
+	}
+	if options.WaitPID < 0 {
+		return errors.New("wait PID cannot be negative")
+	}
+	if options.WaitTimeout < 0 || options.WaitTimeout > 2*time.Minute {
+		return errors.New("wait timeout must be between zero and two minutes")
 	}
 	target, err := filepath.Abs(options.Target)
 	if err != nil {
@@ -176,6 +255,186 @@ func verifyRegularFile(path, label string) error {
 		return fmt.Errorf("%s must be a regular file, not a link", label)
 	}
 	return nil
+}
+
+// verifyTargetPath validates an installed (or backed-up) agent location: a
+// regular file for KindFile, a real directory for KindBundle. Symbolic
+// links are always rejected so replacement never escapes the install root.
+func verifyTargetPath(path, label string, kind Kind) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", label, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s must not be a symbolic link", label)
+	}
+	if kind == KindBundle {
+		if !info.IsDir() {
+			return fmt.Errorf("%s must be a bundle directory", label)
+		}
+		return nil
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s must be a regular file", label)
+	}
+	return nil
+}
+
+// installStaged publishes the verified artifact at the target location.
+// Bundles move atomically from their extraction root, which always shares
+// the target parent directory and therefore the same filesystem.
+func installStaged(staged, target string, kind Kind) error {
+	if kind == KindBundle {
+		if err := os.Rename(staged, target); err != nil {
+			return fmt.Errorf("move staged bundle into place: %w", err)
+		}
+		return nil
+	}
+	return copyFileExclusive(staged, target)
+}
+
+// extractBundleArchive unpacks a verified zip into a private temporary
+// directory inside the installed bundle parent. Extraction is deliberately
+// strict: only regular files living under the expected bundle directory,
+// no links, no AppleDouble residue, no path escapes and a total size cap,
+// so a malformed archive can never write outside the staging root.
+func extractBundleArchive(archivePath, parent, bundleName, relativeExecutable string) (string, string, error) {
+	reader, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return "", "", fmt.Errorf("open update bundle archive: %w", err)
+	}
+	defer reader.Close()
+	root, err := os.MkdirTemp(parent, ".fiberpulse-extract-*")
+	if err != nil {
+		return "", "", fmt.Errorf("create bundle extraction directory beside the installed bundle: %w", err)
+	}
+	fail := func(err error) (string, string, error) {
+		_ = os.RemoveAll(root)
+		return "", "", err
+	}
+	var total int64
+	for _, member := range reader.File {
+		if !validBundleMemberName(member.Name, bundleName) {
+			if ignorableBundleMember(member.Name) {
+				continue
+			}
+			return fail(fmt.Errorf("update archive contains an unexpected entry %q", member.Name))
+		}
+		mode := member.FileInfo().Mode()
+		if mode&os.ModeSymlink != 0 || !mode.IsRegular() {
+			return fail(fmt.Errorf("update archive entry %q must be a regular file", member.Name))
+		}
+		total += int64(member.UncompressedSize64)
+		if total > MaxArtifactBytes || int64(member.UncompressedSize64) > MaxArtifactBytes {
+			return fail(errors.New("extracted update bundle exceeds the maximum supported size"))
+		}
+		if err := extractBundleMember(member, root, mode.Perm()); err != nil {
+			return fail(err)
+		}
+	}
+	bundle := filepath.Join(root, bundleName)
+	if info, err := os.Lstat(bundle); err != nil || !info.IsDir() {
+		return fail(fmt.Errorf("update archive must contain the %s bundle directory", bundleName))
+	}
+	stagedExecutable := filepath.Join(bundle, relativeExecutable)
+	if err := verifyRegularFile(stagedExecutable, "extracted bundle executable"); err != nil {
+		return fail(err)
+	}
+	if info, err := os.Stat(stagedExecutable); err != nil || info.Mode().Perm()&0o100 == 0 {
+		return fail(errors.New("extracted bundle executable lost its executable permission"))
+	}
+	return bundle, root, nil
+}
+
+// validBundleMemberName reports whether a zip entry belongs inside the
+// expected bundle directory without any escape attempt.
+func validBundleMemberName(name, bundleName string) bool {
+	if name == "" || strings.HasPrefix(name, "/") || strings.ContainsRune(name, 0) {
+		return false
+	}
+	segments := strings.Split(name, "/")
+	if segments[0] != bundleName {
+		return false
+	}
+	for _, segment := range segments[1:] {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return len(segments) > 1
+}
+
+// ignorableBundleMember reports AppleDouble metadata that macOS archivers
+// add around real files; it carries no code and is skipped, never written.
+func ignorableBundleMember(name string) bool {
+	if name == "__MACOSX" || strings.HasPrefix(name, "__MACOSX/") {
+		return true
+	}
+	segments := strings.Split(name, "/")
+	return strings.HasPrefix(segments[len(segments)-1], "._")
+}
+
+func extractBundleMember(member *zip.File, root string, permissions os.FileMode) error {
+	destination := filepath.Join(root, filepath.FromSlash(member.Name))
+	parent, err := filepath.Abs(filepath.Dir(destination))
+	if err != nil {
+		return err
+	}
+	cleanRoot, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	if parent != cleanRoot && !strings.HasPrefix(parent, cleanRoot+string(filepath.Separator)) {
+		return fmt.Errorf("update archive entry %q escapes the extraction root", member.Name)
+	}
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("create extracted bundle directory: %w", err)
+	}
+	source, err := member.Open()
+	if err != nil {
+		return fmt.Errorf("open archived bundle entry %q: %w", member.Name, err)
+	}
+	defer source.Close()
+	if permissions == 0 {
+		permissions = 0o644
+	}
+	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, permissions)
+	if err != nil {
+		return fmt.Errorf("create extracted bundle entry %q: %w", member.Name, err)
+	}
+	if _, err := io.Copy(out, io.LimitReader(source, MaxArtifactBytes+1)); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("extract bundle entry %q: %w", member.Name, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close extracted bundle entry %q: %w", member.Name, err)
+	}
+	return nil
+}
+
+// waitForProcessExit blocks until the previous agent process has released
+// the installation. Replacing a running executable fails on Windows and
+// would race the single-instance lock on every platform.
+func waitForProcessExit(ctx context.Context, pid int, alive func(int) bool, timeout time.Duration) error {
+	if pid <= 0 || !alive(pid) {
+		return nil
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for previous agent exit cancelled: %w", context.Cause(ctx))
+		case <-timer.C:
+			return fmt.Errorf("previous agent process %d is still running", pid)
+		case <-ticker.C:
+			if !alive(pid) {
+				return nil
+			}
+		}
+	}
 }
 
 func verifyArtifact(path string, manifest Manifest) error {
@@ -320,7 +579,7 @@ func readHealthReceipt(path string) (healthReceipt, error) {
 	return receipt, nil
 }
 
-func rollbackAndRestart(target, backup, retired string, hadPrevious bool, failedVersion string, process *managedProcess) error {
+func rollbackAndRestart(executable, target, backup, retired string, hadPrevious bool, kind Kind, failedVersion string, process *managedProcess) error {
 	var result error
 	if process != nil {
 		if err := process.command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
@@ -332,11 +591,11 @@ func rollbackAndRestart(target, backup, retired string, hadPrevious bool, failed
 			result = errors.Join(result, errors.New("failed update process did not exit during rollback"))
 		}
 	}
-	result = errors.Join(result, restoreFiles(target, backup, retired, hadPrevious))
+	result = errors.Join(result, restoreFiles(target, backup, retired, hadPrevious, kind))
 	if result != nil {
 		return result
 	}
-	restored, err := startManagedProcess(target, "--post-update", "rollback-"+failedVersion)
+	restored, err := startManagedProcess(executable, "--post-update", "rollback-"+failedVersion)
 	if err != nil {
 		return fmt.Errorf("restart restored agent: %w", err)
 	}
@@ -344,9 +603,9 @@ func rollbackAndRestart(target, backup, retired string, hadPrevious bool, failed
 	return nil
 }
 
-func restoreFiles(target, backup, retired string, hadPrevious bool) error {
+func restoreFiles(target, backup, retired string, hadPrevious bool, kind Kind) error {
 	var result error
-	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+	if err := removeInstalledPath(target, kind); err != nil && !os.IsNotExist(err) {
 		result = errors.Join(result, fmt.Errorf("remove failed update: %w", err))
 	}
 	if result == nil {
@@ -355,6 +614,19 @@ func restoreFiles(target, backup, retired string, hadPrevious bool) error {
 		}
 	}
 	return errors.Join(result, restoreRetiredBackup(backup, retired, hadPrevious))
+}
+
+// removeInstalledPath deletes a path this updater itself installed or
+// rotated: a file for KindFile, a directory tree for KindBundle. It is
+// only ever called on exact paths the updater created during this run.
+func removeInstalledPath(path string, kind Kind) error {
+	if kind == KindBundle {
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			return os.ErrNotExist
+		}
+		return os.RemoveAll(path)
+	}
+	return os.Remove(path)
 }
 
 func restoreRetiredBackup(backup, retired string, hadPrevious bool) error {
@@ -370,6 +642,12 @@ func restoreRetiredBackup(backup, retired string, hadPrevious bool) error {
 		return fmt.Errorf("restore retired update backup: %w", err)
 	}
 	return nil
+}
+
+// ReadState loads the anti-rollback state written by previous updater runs.
+// A missing file yields a zero state, which accepts any first update.
+func ReadState(path string) (State, error) {
+	return loadState(path)
 }
 
 func loadState(path string) (State, error) {

@@ -21,6 +21,9 @@ import (
 
 var version = "0.1.0-dev"
 var sharingEndpoint = ""
+var updateFeedURL = ""
+var updatePublicKey = ""
+var updateSkipPlatformVerify = ""
 
 func main() {
 	if err := run(); err != nil {
@@ -31,6 +34,7 @@ func main() {
 
 func run() error {
 	quitExisting := flag.Bool("quit", false, "request graceful shutdown of the running agent")
+	background := flag.Bool("background", false, "start without opening the dashboard")
 	postUpdate := flag.String("post-update", "", "version started after a verified update")
 	updateHealthPath := flag.String("update-health-file", "", "internal post-update health receipt path")
 	flag.Parse()
@@ -80,7 +84,11 @@ func run() error {
 		}
 		shareTransport = transport
 	}
-	agent, err := app.New(app.Config{Version: version, DatabasePath: filepath.Join(dataDir, "fiberpulse.db"), Provider: provider, ProbeURL: os.Getenv("FIBERPULSE_PROBE_URL"), DNSName: os.Getenv("FIBERPULSE_DNS_NAME"), SharingTransport: shareTransport, Sponsor: sponsorOffer, Logger: logger})
+	updateConfig, err := buildUpdateConfig(dataDir, logger)
+	if err != nil {
+		return err
+	}
+	agent, err := app.New(app.Config{Version: version, DatabasePath: filepath.Join(dataDir, "fiberpulse.db"), Provider: provider, ProbeURL: os.Getenv("FIBERPULSE_PROBE_URL"), DNSName: os.Getenv("FIBERPULSE_DNS_NAME"), SharingTransport: shareTransport, Sponsor: sponsorOffer, Logger: logger, Update: updateConfig})
 	if err != nil {
 		return err
 	}
@@ -116,11 +124,19 @@ func run() error {
 			}
 		},
 		Report: func() { _ = platform.OpenURL(agent.BootstrapURL()) },
-		Update: func() { logger.Info("interactive update check is not configured in this development build") },
-		Quit:   func() { _ = agent.Action(context.Background(), "quit", []byte(`{}`)) },
+		Update: func() {
+			go func() {
+				if err := agent.CheckForUpdate(context.Background()); err != nil {
+					logger.Info("manual update check", "error", err)
+				}
+			}()
+		},
+		Quit: func() { _ = agent.Action(context.Background(), "quit", []byte(`{}`)) },
 	}
-	if err := platform.OpenURL(url); err != nil {
-		logger.Info("open the dashboard manually", "url", url, "error", err)
+	if !*background {
+		if err := platform.OpenURL(url); err != nil {
+			logger.Info("open the dashboard manually", "url", url, "error", err)
+		}
 	}
 	go func() {
 		select {

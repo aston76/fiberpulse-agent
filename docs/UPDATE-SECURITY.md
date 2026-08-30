@@ -52,8 +52,8 @@ advanced only after the health check succeeds.
 
 Development builds are signed ad hoc on macOS and are not public release
 artifacts. Windows release artifacts require Authenticode SHA-256 and RFC 3161
-timestamping. A public macOS updater must replace the complete Developer-ID
-signed and notarized `.app` bundle; replacing only its inner executable would
-invalidate the bundle seal. The current dashboard `Check for update` action is
-therefore intentionally non-operational until release signing, download,
-notarization and full-bundle replacement are wired and tested.
+timestamping. A public macOS updater replaces the complete Developer-ID signed,
+notarized and Gatekeeper-approved `.app` bundle; replacing only its inner
+executable would invalidate the bundle seal. Release builds inject the HTTPS
+feed URL and Ed25519 public key at link time. Development builds omit both, so
+the dashboard reports updates as disabled instead of accepting unsigned files.
