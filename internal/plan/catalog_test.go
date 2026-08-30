@@ -16,8 +16,8 @@ func TestCatalogOffersAreUniqueAndSane(t *testing.T) {
 		seen[offer.ID] = true
 		providers[offer.ISP] = true
 		countries[offer.CountryCode] = true
-		if offer.CountryCode != PhilippinesCode || offer.CountryName != PhilippinesName {
-			t.Fatalf("initial offer %q has unexpected country %s/%s", offer.ID, offer.CountryCode, offer.CountryName)
+		if len(offer.CountryCode) != 2 || offer.CountryName == "" {
+			t.Fatalf("offer %q lacks country metadata", offer.ID)
 		}
 		if offer.ISP == "" || offer.Name == "" {
 			t.Fatalf("offer %q lacks isp or name", offer.ID)
@@ -28,21 +28,26 @@ func TestCatalogOffersAreUniqueAndSane(t *testing.T) {
 		if offer.UploadMbps < 0 {
 			t.Fatalf("offer %q has negative upload", offer.ID)
 		}
-		if offer.VerifiedAt != CatalogVerifiedAt || offer.SourceURL == "" {
+		if offer.VerifiedAt == "" || offer.SourceURL == "" {
 			t.Fatalf("offer %q lacks verification metadata", offer.ID)
 		}
-		if offer.PricePHP > 0 && (offer.PriceAmount != offer.PricePHP || offer.CurrencyCode != PhilippinesCurrency) {
+		if offer.PricePHP > 0 && (int(offer.PriceAmount) != offer.PricePHP || offer.CurrencyCode != PhilippinesCurrency) {
 			t.Fatalf("offer %q lacks generic price metadata", offer.ID)
 		}
 		if offer.PriceAmount > 0 && offer.CurrencyCode == "" {
 			t.Fatalf("offer %q has an amount without a currency", offer.ID)
 		}
 	}
-	if len(providers) < 10 {
+	if len(providers) < 30 {
 		t.Fatalf("catalog unexpectedly narrow: %d providers", len(providers))
 	}
-	if len(countries) != 1 || !countries[PhilippinesCode] {
-		t.Fatalf("initial catalog should expose only the Philippines: %+v", countries)
+	for _, code := range []string{"PH", "US", "GB", "DE", "FR", "AU", "CA", "CH", "ES", "BR", "IN"} {
+		if !countries[code] {
+			t.Fatalf("catalog is missing country %s", code)
+		}
+	}
+	if !seen["converge-fiberx-400"] || !seen["fios-300"] || !seen["virgin-m125"] {
+		t.Fatal("catalog is missing known seed offers")
 	}
 }
 

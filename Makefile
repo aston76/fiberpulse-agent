@@ -2,7 +2,13 @@ GO_IMAGE ?= golang:1.26.7-bookworm
 NODE_IMAGE ?= node:24-bookworm-slim
 ROOT := $(CURDIR)
 
-.PHONY: test dashboard build windows macos
+.PHONY: test dashboard build windows macos catalog
+
+# Refresh the embedded plan catalog snapshots from the canonical data in
+# fiberpulse-platform (ADR 0001). Run before a release after catalog changes.
+catalog:
+	mkdir -p internal/plan/data
+	cp ../fiberpulse-platform/data/catalog/*.json internal/plan/data/
 
 test:
 	docker run --rm -v "$(ROOT):/src" -w /src $(GO_IMAGE) sh -c 'go test ./...'
