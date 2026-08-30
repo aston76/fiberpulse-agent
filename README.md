@@ -1,5 +1,7 @@
 # FiberPulse Agent
 
+> Project restart and operational handoff: [`docs/REPRISE_FIBERPULSE.md`](docs/REPRISE_FIBERPULSE.md)
+
 Local-first Windows 10/11 and macOS 13+ Internet-performance agent. The agent does not run M-Lab
 or share FiberPulse data until the corresponding, separate consent is recorded.
 
