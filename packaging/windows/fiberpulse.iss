@@ -42,7 +42,7 @@ VersionInfoVersion={#MyAppVersionInfo}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=FiberPulse connection quality monitor
 VersionInfoProductName={#MyAppName}
-VersionInfoProductVersion={#MyAppVersion}
+VersionInfoProductVersion={#MyAppVersionInfo}
 #ifdef FiberPulseReleaseSigning
 SignTool=FiberPulseSign $f
 SignedUninstaller=yes
