@@ -126,5 +126,17 @@ func TestLocalizedDraftsUseEverySupportedLanguage(t *testing.T) {
 		if !strings.Contains(draft.Body, expected) {
 			t.Errorf("localized draft %s does not contain %q", language, expected)
 		}
+		if language != "en" && (strings.Contains(draft.Body, "The attached FiberPulse PDF") || strings.Contains(draft.CallScript, "Please create a technical investigation")) {
+			t.Errorf("localized draft %s still contains an English generated paragraph", language)
+		}
+		if language != "en" && (strings.Contains(draft.Body, "Additional router: No") || strings.Contains(draft.Body, "Mesh system: No")) {
+			t.Errorf("localized draft %s still contains an English equipment status", language)
+		}
+		profileWithRouter := profile
+		profileWithRouter.AdditionalRouter = true
+		draftWithRouter := BuildDraftLocalized(profileWithRouter, nil, SupportContact{ISP: "Example ISP"}, assessment, language)
+		if language != "en" && strings.Contains(draftWithRouter.Body, "Yes - model not provided") {
+			t.Errorf("localized draft %s still contains an English positive equipment status", language)
+		}
 	}
 }
