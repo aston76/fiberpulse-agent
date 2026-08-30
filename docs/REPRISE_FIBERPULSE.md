@@ -1,6 +1,6 @@
 # FiberPulse — passation complète et reprise du projet
 
-Dernière vérification opérationnelle : **30 août 2026, fuseau Asia/Manila**.
+Dernière vérification opérationnelle : **31 août 2026, fuseau Asia/Manila**.
 
 Ce fichier est la source de reprise principale. Une nouvelle conversation doit commencer par le lire, puis vérifier les états GitHub, DNS, o2switch et Store qui peuvent avoir changé depuis cette date.
 
@@ -14,7 +14,7 @@ FiberPulse est une application locale Windows 10/11 et macOS 13+ qui :
 - contextualise les mesures (Wi-Fi/Ethernet, VPN, matériel, routeur supplémentaire, lieu approximatif) ;
 - détecte les écarts persistants et incidents ;
 - génère des rapports PDF/CSV et des brouillons de réclamation ;
-- peut partager séparément des mesures techniques anonymisées avec un futur observatoire public ;
+- peut partager séparément des mesures techniques anonymisées avec l’observatoire public ;
 - prévoit des mises à jour sécurisées Windows/macOS ;
 - possède un site public, un dépôt méthodologique et une plateforme backend séparée.
 
@@ -34,16 +34,16 @@ Sous-projets :
 |---|---|---|---|
 | `fiberpulse-agent` | Application desktop, dashboard local, mesure, rapports, updater, packaging | `https://github.com/aston76/fiberpulse-agent` | Public, nécessaire aux téléchargements et mises à jour |
 | `fiberpulse-site` | Site produit `testspeednow.com` et déploiement o2switch | `https://github.com/aston76/fiberpulse-site` | Privé |
-| `fiberpulse-platform` | API/plateforme et futur observatoire | `https://github.com/aston76/fiberpulse-platform` | À revalider avant publication |
-| `fiberpulse-methodology` | Méthodologie et contrats de mesure | `https://github.com/aston76/fiberpulse-methodology` | À revalider avant publication |
+| `fiberpulse-platform` | API/plateforme et catalogues d’offres | `https://github.com/aston76/fiberpulse-platform` | Privé |
+| `fiberpulse-methodology` | Méthodologie et contrats de mesure | `https://github.com/aston76/fiberpulse-methodology` | Privé |
 
 Commits vérifiés au moment de cette passation :
 
 ```text
-fiberpulse-agent       08b3800 build: add Microsoft Store MSIX package
-fiberpulse-site        bf188be deploy: automate private o2switch releases
-fiberpulse-platform    aa4ccf5 Complete local probe and empty API responses
-fiberpulse-methodology 7ebcccb Harden measurement contracts and CI validation
+fiberpulse-agent       30f6cd0 Checkout source before provisional release publish
+fiberpulse-site        b806504 Refresh static release hydration cache
+fiberpulse-platform    84aa882 Expand major ISP plan coverage
+fiberpulse-methodology ad89994 Document country-specific diagnostic guidance
 ```
 
 Le dossier non suivi `fiberpulse-agent/output/` contient des PDF générés. Il ne faut pas le committer par défaut.
@@ -193,21 +193,22 @@ Procédure manuelle Mac provisoire :
 
 Quand l’abonnement Apple sera acheté, renseigner les secrets de `release.yml`, signer avec Developer ID, notariser avec `notarytool`, stapler le ticket puis réactiver le feed Mac. Le pipeline est déjà conçu pour remplacer le bundle `.app` complet et effectuer un rollback.
 
-### 5.5 Blocage actuel des releases
+### 5.5 État actuel des releases
 
-Au moment de cette passation, `gh release list --repo aston76/fiberpulse-agent` ne retourne **aucune release publique**.
+La release publique `v0.1.0` est publiée :
 
-Le workflow `.github/workflows/release.yml` attend actuellement à la fois :
+```text
+https://github.com/aston76/fiberpulse-agent/releases/tag/v0.1.0
+```
 
-- les artefacts Windows signés ;
-- un artefact macOS Developer ID notarialisé.
+Elle contient le ZIP macOS universel, la notice d’installation et `SHA256SUMS`. L’archive publique téléchargée depuis GitHub a été revérifiée : hashes valides, structure `codesign` valide, signature ad hoc sans TeamIdentifier, URL de partage de production présente, feed d’auto-update absent, démarrage et arrêt complet réussis. Gatekeeper la rejette normalement comme développeur non identifié ; le site et la notice le disent explicitement.
 
-Comme la décision actuelle est d’attendre pour Apple, il faudra adapter ce workflow avant la première release afin que :
+Le workflow propose désormais deux modes séparés :
 
-- la publication Windows ne soit pas bloquée par l’absence de secrets Apple ;
-- le ZIP Mac ad hoc soit clairement présenté comme téléchargement provisoire manuel, jamais comme application notarialisée ;
-- aucun manifest d’auto-update Mac sécurisé ne soit publié avant Developer ID ;
-- le site ne prétende pas que la version Mac est notarialisée.
+- `macos-provisional`, pour publier uniquement le ZIP Mac manuel non notarialisé ;
+- `full-signed`, réservé aux artefacts Windows Authenticode et macOS Developer ID/notarisés.
+
+Windows n’est pas proposé en téléchargement direct non signé. La soumission MSIX du produit `9N3XLBSX2MPL` est réellement à l’étape **3/4 — en cours de certification** dans Partner Center. Attendre la décision Microsoft ; ne pas contourner ce contrôle avec un installateur public non signé.
 
 ## 6. Site public et déploiement
 
@@ -250,10 +251,10 @@ CPANEL_USER
 CPANEL_TOKEN
 ```
 
-Le premier déploiement GitHub Actions a réussi :
+Dernier déploiement GitHub Actions vérifié avant cette mise à jour documentaire :
 
 ```text
-https://github.com/aston76/fiberpulse-site/actions/runs/33300879909
+https://github.com/aston76/fiberpulse-site/actions/runs/33328210855
 ```
 
 Chaque push sur `fiberpulse-site/main` lance lint, build, export o2switch, upload ciblé dans le docroot et vérification du virtual host.
@@ -268,18 +269,16 @@ Il ne doit plus être confondu avec le domaine final.
 
 ### État DNS/HTTPS à la dernière vérification
 
-État observé le 30/08/2026 :
+État vérifié le 31/08/2026 :
 
 ```text
 NS publics: ns1.o2switch.net, ns2.o2switch.net
-A public encore observé: 213.255.195.57
-IP o2switch attendue: 109.234.160.138
-HTTPS public: 200 sur l’ancienne IP
+A/virtual host: 109.234.160.138
+HTTPS public: valide sans -k
+site FiberPulse public: servi par o2switch
 ```
 
-La zone cPanel avait déjà l’A correct `109.234.160.138`, mais les DNS autoritaires publics servaient encore l’ancienne IP. Une surveillance `finaliser-testspeednow-com` a été créée pour attendre la synchronisation, installer un certificat Let’s Encrypt valide, vérifier les routes et s’arrêter après succès.
-
-Ne jamais annoncer que `testspeednow.com` sert le nouveau site tant que ces commandes ne le prouvent pas :
+Pour toute reprise future, revérifier cet état avec :
 
 ```sh
 dig +short NS testspeednow.com
@@ -295,17 +294,17 @@ L’A doit être `109.234.160.138` et `curl` doit réussir sans `-k`.
 Le composant `fiberpulse-site/components/release-downloads.tsx` appelle :
 
 ```text
-/api/release?v=2
+/api/release?v=3
 ```
 
-Le proxy vérifie la dernière release `aston76/fiberpulse-agent` et exige actuellement deux alias :
+Le proxy vérifie la dernière release `aston76/fiberpulse-agent` et sait exposer chaque plateforme indépendamment :
 
 ```text
-FiberPulse-windows-x64-setup.exe
 FiberPulse-macos-universal.zip
+FiberPulse-windows-x64-setup.exe (uniquement après signature complète)
 ```
 
-Sans release complète, l’API retourne `available: false` et le site affiche un téléchargement en attente. Après la décision Mac provisoire, revoir le texte afin de distinguer clairement :
+Au 31/08/2026, l’API publie `v0.1.0` avec `macos` disponible et `windows: null`. Les cartes localisées distinguent clairement :
 
 - Windows signé/Store ;
 - Mac téléchargement provisoire non notarialisé avec documentation manuelle ;
@@ -313,15 +312,7 @@ Sans release complète, l’API retourne `available: false` et le site affiche u
 
 ## 8. Observatoire public et confidentialité
 
-Le site contient déjà l’interface d’un observatoire avec pays, drapeau, région approximative, date/heure, fournisseur, offre, débit et recherche.
-
-Au 30/08/2026, l’endpoint o2switch retourne :
-
-```json
-{"available":false,"code":"observatory_not_configured"}
-```
-
-C’est volontaire tant que le backend public n’est pas raccordé.
+Le site contient l’interface active de l’observatoire avec pays, drapeau, date/heure, fournisseur, offre, débit, agrégats et recherche. Les endpoints o2switch renvoient des collections valides, y compris quand aucune mesure consentie n’est encore présente. Ne jamais insérer de fausses mesures pour donner une impression d’activité.
 
 Ne jamais publier :
 
@@ -423,44 +414,40 @@ Relire le workflow avant de créer les secrets : les noms exacts peuvent évolue
 Dernière CI agent vérifiée comme réussie :
 
 ```text
-https://github.com/aston76/fiberpulse-agent/actions/runs/33297702164
+https://github.com/aston76/fiberpulse-agent/actions/runs/33326921416
 ```
 
-Déploiement site vérifié comme réussi :
+Release macOS provisoire vérifiée comme réussie :
 
 ```text
-https://github.com/aston76/fiberpulse-site/actions/runs/33300879909
+https://github.com/aston76/fiberpulse-agent/actions/runs/33326922499
 ```
 
 Une réussite CI locale ou sur une ancienne archive ne suffit pas pour publier. Vérifier l’artefact exact produit par la dernière exécution réussie.
 
-Note du 30/08/2026 : le test macOS `TestAnonymousMeasurementTravelsFromAgentQueueToObservatory` (`internal/app`) est instable en CI — échec sur le run 33301647406 puis réussite sans changement de code sur 33303361981. Ne pas paniquer sur un échec isolé de ce test, mais finir par le rendre déterministe. Même phénomène sur `TestSharingRevocationAtomicallyPurgesQueue` (`internal/storage`) : échec macOS-15 sur le run 33306190622, réussite à l’identique après relance. Deux tests macOS instables distincts — prévoir une passe de déflakage CI.
+Les deux anciennes instabilités liées aux horodatages SQLite ont été corrigées : l’ordre des consentements utilise l’ordre d’insertion et la première tentative de partage reste exigible même en cas de recul de l’horloge. Les matrices macOS 14/15 et Windows sont vertes sur le run ci-dessus.
 
 ## 13. Prochaines actions, dans l’ordre
 
-1. Attendre/terminer la propagation DNS de `testspeednow.com`, installer Let’s Encrypt et vérifier le vrai site public sur desktop/mobile.
-2. Terminer la soumission Windows dans Partner Center et relire le statut réel de certification.
-3. Décider du premier numéro de version public stable.
-4. Adapter `release.yml` pour que Windows puisse être publié sans dépendre de la notarisation Mac.
-5. Produire le ZIP Mac provisoire, clairement étiqueté « non notarialisé », avec sa petite documentation d’installation.
-6. Garder l’auto-update Mac public désactivé tant qu’Apple Developer ID n’est pas disponible.
-7. Publier une première release GitHub complète et vérifier `/api/release?v=2` sur le domaine final.
-8. Tester une vraie mise à jour Windows de bout en bout : ancienne version installée → nouvelle version détectée → remplacement → reçu de santé → historique conservé.
-9. Tester la procédure manuelle Mac avec un compte utilisateur propre et Gatekeeper actif.
-10. Raccorder l’observatoire seulement lorsque le backend, le consentement et la minimisation des données sont validés.
+1. Attendre la fin de la certification Microsoft de la soumission Windows et relire son statut dans Partner Center.
+2. Après validation Store, vérifier la fiche publique, l’installation, le bouton Quit et la mise à jour Microsoft Store sur un Windows 10/11 réel.
+3. Ne publier l’installateur Windows direct qu’après signature Authenticode et essai réel ancienne version → mise à jour → reçu de santé → historique conservé.
+4. Garder l’auto-update Mac public désactivé tant qu’Apple Developer ID et la notarisation ne sont pas disponibles.
+5. Effectuer une revue juridique par pays avant toute promesse marketing fondée sur une règle réglementaire ou contractuelle.
 
 ## 14. Extension multi-pays (réalisée le 30/08/2026)
 
 Décision : ADR 0001 (critères) + ADR 0002 (toutes les vagues fusionnées) dans `fiberpulse-methodology/adr/`.
 
-- **11 pays en production de données** : PH, US, GB, DE, FR, AU, CA, CH, ES, BR, IN — 188 offres vérifiées dans `fiberpulse-platform/data/catalog/`.
+- **11 pays en production de données** : PH, US, GB, DE, FR, AU, CA, CH, ES, BR, IN — 213 offres documentées dans `fiberpulse-platform/data/catalog/`.
 - Contrat `plan-catalog-v1` : `fiberpulse-methodology/schemas/plan-catalog-v1.schema.json`.
 - Agent : le catalogue Go est devenu un chargeur `go:embed` sur `internal/plan/data/*.json` (rafraîchi par `make catalog`) ; `PriceAmount` est passé en `float64` ; le sélecteur de pays avec drapeaux existe dans le dashboard ; le libellé de vitesse respecte la base légale du pays (« up to », « average » UK, « typical » 5G fixe).
 - Internationalisation de l’app : interface embarquée disponible hors ligne en anglais, français, allemand, espagnol, portugais du Brésil, italien et hindi (`dashboard/src/i18n.ts`). La langue du système est détectée au premier lancement ; un sélecteur dans Réglages conserve ensuite le choix localement. La langue sélectionnée est aussi enregistrée dans les événements de consentement M-Lab/FiberPulse.
 - Site : section « Coverage » avec drapeaux (`components/coverage-section.tsx`), données synchronisées par `npm run sync:catalog` depuis la plateforme. La page produit et la politique de confidentialité disposent de routes indexables en anglais, français, allemand, espagnol, portugais du Brésil, italien et hindi (`/`, `/fr`, `/de`, `/es`, `/pt-br`, `/it`, `/hi` et leurs routes `/privacy`), avec langue du document, URL canonique, `hreflang` et sitemap multilingue.
 - Veille mensuelle automatisée (automatisation Codex `fiberpulse-catalog-watch`, le 1er de chaque mois) : revérifier les pages officielles, valider humainement, mettre à jour puis synchroniser agent et site.
 - Les exports PDF, CSV, le brouillon de réclamation et l’e-mail `.eml` suivent désormais la langue active. Hindi utilise les polices embarquées Noto Sans Devanagari sous licence OFL. Les noms officiels des offres et les valeurs saisies par l’abonné ne sont jamais traduits.
-- Reste à faire : seuils de comparaison par pays (Ofcom « average », TKG §58, ARCEP 60 %) ; revue juridique de l’observatoire par pays avant une communication marketing ; compléter les gaps listés dans `fiberpulse-platform/data/catalog/README.md`.
+- L’ADR 0003 documente les parcours pays et sépare strictement les bandes diagnostiques produit des seuils juridiques. Les bandes 70 %/40 % ne sont jamais présentées comme des règles légales ; l’ancienne mention non sourcée d’un seuil « ARCEP 60 % » est abandonnée.
+- Reste à faire au fil de la veille : revue juridique avant communication marketing et traitement des gaps explicitement conservés dans `fiberpulse-platform/data/catalog/README.md`.
 
 ## 15. Observatoire o2switch et flux public (30/08/2026)
 
@@ -471,6 +458,8 @@ Décision : ADR 0001 (critères) + ADR 0002 (toutes les vagues fusionnées) dans
 - `fiberpulse-site/deploy/o2switch/api/observatory/index.php` fournit mesures paginées, facettes pays/fournisseurs et agrégats par pays. Le site interroge ce flux toutes les 15 secondes, annonce le nouveau test anonymement et met la nouvelle ligne en lumière. `prefers-reduced-motion` désactive l’animation.
 - L’interface de l’observatoire est disponible dans les sept langues du site, y compris les états de chargement, d’erreur et de données vides. Les anciennes fausses lignes de démonstration ont été retirées.
 - Test local prouvé : inscription → signature Ed25519 → insertion SQLite → lecture publique. Les capacités `pdo_sqlite` et `sodium` doivent aussi être vérifiées sur l’hébergement réel via `/api/v1/health` après chaque déploiement.
+- Une maintenance GitHub Actions quotidienne à 01:17 UTC crée une sauvegarde SQLite transactionnelle dans le répertoire privé, vérifie son intégrité, conserve 35 jours de sauvegardes et purge uniquement les nonces expirés et installations techniques inactives depuis plus de 366 jours. Les mesures historiques ne sont pas purgées par cette maintenance.
+- Preuve de production : run `33327951193`, sauvegarde de 40 960 octets, puis `/api/v1/health` avec `status: ok`, `storage: true`, `signatures: true` et `backup_fresh: true`.
 
 ## 16. Critères de fin pour la prochaine reprise
 
