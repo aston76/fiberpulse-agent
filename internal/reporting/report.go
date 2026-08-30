@@ -380,11 +380,11 @@ func (r *reportPDF) drawPlanComparison(offer *plan.Offer, complete []measurement
 		amount := offer.PriceAmount
 		currency := offer.CurrencyCode
 		if amount == 0 && offer.PricePHP > 0 {
-			amount = offer.PricePHP
+			amount = float64(offer.PricePHP)
 			currency = plan.PhilippinesCurrency
 		}
 		if amount > 0 {
-			metadata += fmt.Sprintf("  |  %s %s / %s", currency, formatInteger(amount), offer.PricePeriod)
+			metadata += fmt.Sprintf("  |  %s %s / %s", currency, formatPrice(amount), offer.PricePeriod)
 		}
 	}
 	r.setFont("GoRegular", 7.5)
@@ -616,6 +616,15 @@ func formatInteger(value int) string {
 		digits = digits[:i] + "," + digits[i:]
 	}
 	return digits
+}
+
+// formatPrice renders catalog prices: whole amounts stay integers,
+// fractional amounts (EUR, CHF, AUD tiers) keep two decimals.
+func formatPrice(amount float64) string {
+	if amount == float64(int64(amount)) {
+		return formatInteger(int(amount))
+	}
+	return strconv.FormatFloat(amount, 'f', 2, 64)
 }
 
 func printable(value string) string {
