@@ -434,7 +434,7 @@ https://github.com/aston76/fiberpulse-site/actions/runs/33300879909
 
 Une réussite CI locale ou sur une ancienne archive ne suffit pas pour publier. Vérifier l’artefact exact produit par la dernière exécution réussie.
 
-Note du 30/08/2026 : le test macOS `TestAnonymousMeasurementTravelsFromAgentQueueToObservatory` (`internal/app`) est instable en CI — échec sur le run 33301647406 puis réussite sans changement de code sur 33303361981. Ne pas paniquer sur un échec isolé de ce test, mais finir par le rendre déterministe.
+Note du 30/08/2026 : le test macOS `TestAnonymousMeasurementTravelsFromAgentQueueToObservatory` (`internal/app`) est instable en CI — échec sur le run 33301647406 puis réussite sans changement de code sur 33303361981. Ne pas paniquer sur un échec isolé de ce test, mais finir par le rendre déterministe. Même phénomène sur `TestSharingRevocationAtomicallyPurgesQueue` (`internal/storage`) : échec macOS-15 sur le run 33306190622, réussite à l’identique après relance. Deux tests macOS instables distincts — prévoir une passe de déflakage CI.
 
 ## 13. Prochaines actions, dans l’ordre
 
