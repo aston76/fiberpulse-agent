@@ -261,7 +261,7 @@ export function translate(locale: Locale, source: string) {
   return dictionaries[locale].get(source) || source;
 }
 
-const originalText = new WeakMap<Text, string>();
+const textState = new WeakMap<Text, { source: string; rendered: string }>();
 const translatedAttributes = ["aria-label", "placeholder", "title"] as const;
 
 function translateText(locale: Locale, source: string) {
@@ -296,8 +296,15 @@ function translateNode(root: ParentNode, locale: Locale) {
     const node = current as Text;
     const parent = node.parentElement;
     if (!parent || ["SCRIPT", "STYLE", "TEXTAREA"].includes(parent.tagName)) continue;
-    if (!originalText.has(node)) originalText.set(node, node.data);
-    node.data = translateText(locale, originalText.get(node) || node.data);
+    let state = textState.get(node);
+    if (!state) state = { source: node.data, rendered: node.data };
+    // If Preact changed an existing text node after a status refresh, its
+    // current value is the new English source. A locale switch, by contrast,
+    // leaves current equal to the last rendered translation.
+    if (node.data !== state.rendered) state.source = node.data;
+    state.rendered = translateText(locale, state.source);
+    textState.set(node, state);
+    if (node.data !== state.rendered) node.data = state.rendered;
   }
   const elements = root instanceof Element ? [root, ...root.querySelectorAll("*")] : [...root.querySelectorAll("*")];
   for (const element of elements) {
@@ -324,13 +331,20 @@ export function useLocale() {
     translateNode(document.body, locale);
     const observer = new MutationObserver(mutations => {
       for (const mutation of mutations) {
+        if (mutation.type === "characterData") {
+          const node = mutation.target as Text;
+          const state = textState.get(node);
+          if (state && node.data === state.rendered) continue;
+          translateNode(node.parentElement || document.body, locale);
+          continue;
+        }
         for (const node of mutation.addedNodes) {
           if (node instanceof Element) translateNode(node, locale);
           else if (node instanceof Text && node.parentElement) translateNode(node.parentElement, locale);
         }
       }
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true, characterData: true, subtree: true });
     return () => observer.disconnect();
   }, [locale]);
 
