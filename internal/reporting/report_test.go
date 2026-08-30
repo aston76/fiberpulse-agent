@@ -2,6 +2,7 @@ package reporting
 
 import (
 	"encoding/csv"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -91,5 +92,24 @@ func TestReportableResultsAreReverseChronological(t *testing.T) {
 	ordered := reportableResults([]measurement.Result{earlier, later})
 	if len(ordered) != 2 || !ordered[0].StartedAt.Equal(later.StartedAt) {
 		t.Fatalf("results not reverse chronological: %+v", ordered)
+	}
+}
+
+func TestLocalizedExports(t *testing.T) {
+	result := measurement.Result{StartedAt: time.Now().UTC(), Provider: measurement.ProviderMLabNDT7, DownloadBPS: 120_000_000, UploadBPS: 40_000_000, MinRTTUS: 15_000, Status: measurement.StatusComplete, ConfidenceScore: 92, ConfidenceLevel: "high", PublicEligible: true}
+	for _, language := range []string{"en", "fr", "de", "es", "pt-BR", "it", "hi"} {
+		csvBody, err := CSVLocalized([]measurement.Result{result}, language)
+		if err != nil || len(csvBody) < 50 {
+			t.Fatalf("CSV %s: %v", language, err)
+		}
+		pdfBody, err := PDFWithPlanLocalized([]measurement.Result{result}, result.StartedAt.Add(-24*time.Hour), result.StartedAt, nil, language)
+		if err != nil || len(pdfBody) < 1_000 {
+			t.Fatalf("PDF %s: %v (%d bytes)", language, err, len(pdfBody))
+		}
+		if directory := os.Getenv("FIBERPULSE_PDF_PREVIEW_DIR"); directory != "" {
+			if err := os.WriteFile(directory+"/fiberpulse-report-"+language+".pdf", pdfBody, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }

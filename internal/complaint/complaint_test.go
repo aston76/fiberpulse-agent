@@ -113,3 +113,18 @@ func TestEMLContainsDraftAndPDFAttachment(t *testing.T) {
 		t.Fatalf("missing EML parts text=%v pdf=%v", foundText, foundPDF)
 	}
 }
+
+func TestLocalizedDraftsUseEverySupportedLanguage(t *testing.T) {
+	profile := Profile{FullName: "Test Subscriber", AccountNumber: "ACC-123", ServiceAddress: "Test address"}
+	assessment := Assessment{AdvertisedDownloadMbps: 500, QualifiedTests: 21, ObservedDays: 7, MedianDownloadMbps: 200, DownloadPercent: 40}
+	expectations := map[string]string{
+		"en": "Subscriber details", "fr": "Coordonnées de l’abonné", "de": "Kundendaten", "es": "Datos del abonado",
+		"pt-BR": "Dados do assinante", "it": "Dati dell’abbonato", "hi": "ग्राहक विवरण",
+	}
+	for language, expected := range expectations {
+		draft := BuildDraftLocalized(profile, nil, SupportContact{ISP: "Example ISP"}, assessment, language)
+		if !strings.Contains(draft.Body, expected) {
+			t.Errorf("localized draft %s does not contain %q", language, expected)
+		}
+	}
+}

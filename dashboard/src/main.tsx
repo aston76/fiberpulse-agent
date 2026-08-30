@@ -445,7 +445,7 @@ function App() {
   const exportReport = async (format: "pdf" | "csv" | "complaint-pdf" | "complaint-eml") => {
     setExporting(format); setActionError("");
     try {
-      const response = await fetch(`/api/v1/export/${format}`, { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": envelope.csrf_token } });
+      const response = await fetch(`/api/v1/export/${format}?language=${encodeURIComponent(locale)}`, { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": envelope.csrf_token } });
 	      if (!response.ok) throw new Error(format.startsWith("complaint") ? `Complaint package is not ready (${response.status})` : `Report generation failed (${response.status})`);
 	      const url = URL.createObjectURL(await response.blob());
 	      const filenames: Record<string, string> = { pdf: "fiberpulse-report.pdf", csv: "fiberpulse-report.csv", "complaint-pdf": "fiberpulse-complaint-report.pdf", "complaint-eml": "fiberpulse-complaint-email.eml" };
@@ -520,7 +520,7 @@ function App() {
 	    {settingsOpen && <div class="modal-backdrop"><section class="modal settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <button class="modal-close" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button>
         <p class="eyebrow">Settings</p><h2 id="settings-title">Simple controls</h2>
-        <div class="setting-row language-setting"><div><b>Language</b><span key={locale}>{localeOptions.find(option => option.code === locale)?.label}</span></div><select aria-label="Language" value={locale} onChange={event => setLocale(event.currentTarget.value as typeof locale)}>{localeOptions.map(option => <option value={option.code}>{option.label}</option>)}</select></div>
+	        <div class="setting-row language-setting"><div><b>Language</b><span key={locale}>{localeOptions.find(option => option.code === locale)?.label}</span></div><select aria-label="Language" value={locale} onChange={event => { const language = event.currentTarget.value as typeof locale; setLocale(language); void action("language", { language }); }}>{localeOptions.map(option => <option value={option.code}>{option.label}</option>)}</select></div>
         <div class="setting-row"><div><b>Internet speed tests</b><span>{status.mlab_consent.granted ? "Allowed permanently" : "Disabled"}</span></div>{status.mlab_consent.granted ? <button class="mini-button danger" onClick={() => void saveMeasurementPermission(false)}>Disable</button> : <button class="mini-button" onClick={() => { setSettingsOpen(false); setPermissionOpen(true); }}>Enable</button>}</div>
         <div class="setting-row"><div><b>Automatic monitoring</b><span>{status.paused ? "Paused" : "Running"}</span></div><button class="mini-button" onClick={() => void run("pause", { paused: !status.paused })}>{status.paused ? "Resume" : "Pause"}</button></div>
         <div class="setting-row"><div><b>Anonymous sharing</b><span>{status.sharing_consent.granted ? "Enabled" : status.sharing_available ? "Optional and disabled" : "Unavailable in this build"}</span></div>{status.sharing_consent.granted ? <button class="mini-button danger" onClick={() => void saveSharing(false)}>Disable</button> : <button class="mini-button" disabled={!status.sharing_available} onClick={() => { setSettingsOpen(false); setSharingOpen(true); }}>Enable</button>}</div>

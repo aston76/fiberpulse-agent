@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"fiberpulse.dev/agent/internal/complaint"
+	"fiberpulse.dev/agent/internal/localization"
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/plan"
 	"github.com/signintech/gopdf"
@@ -18,13 +19,17 @@ import (
 	"golang.org/x/image/font/gofont/goregular"
 )
 
-//go:embed fiberpulse-mark.png
+//go:embed fiberpulse-mark.png fonts/*.ttf
 var reportAssets embed.FS
 
 func CSV(results []measurement.Result) ([]byte, error) {
+	return CSVLocalized(results, "en")
+}
+
+func CSVLocalized(results []measurement.Result, language string) ([]byte, error) {
 	var out bytes.Buffer
 	w := csv.NewWriter(&out)
-	header := []string{"started_at_utc", "provider", "server", "download_bps", "upload_bps", "min_rtt_us", "status", "confidence_score", "confidence_level", "public_eligible", "reason_codes"}
+	header := localizedCSVHeader(language)
 	if err := w.Write(header); err != nil {
 		return nil, err
 	}
@@ -47,7 +52,11 @@ func PDF(results []measurement.Result, periodStart, periodEnd time.Time) ([]byte
 // conservative: observed NDT7 performance is evidence, not proof of physical
 // line capacity or ISP responsibility.
 func PDFWithPlan(results []measurement.Result, periodStart, periodEnd time.Time, offer *plan.Offer) ([]byte, error) {
-	r, err := newReportPDF()
+	return PDFWithPlanLocalized(results, periodStart, periodEnd, offer, "en")
+}
+
+func PDFWithPlanLocalized(results []measurement.Result, periodStart, periodEnd time.Time, offer *plan.Offer, language string) ([]byte, error) {
+	r, err := newReportPDF(language)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +67,11 @@ func PDFWithPlan(results []measurement.Result, periodStart, periodEnd time.Time,
 // ComplaintPDF creates a provider-ready dossier. Subscriber details remain in
 // the locally generated document and are never copied to FiberPulse logs.
 func ComplaintPDF(results []measurement.Result, periodStart, periodEnd time.Time, offer *plan.Offer, profile complaint.Profile, assessment complaint.Assessment, contact complaint.SupportContact) ([]byte, error) {
-	r, err := newReportPDF()
+	return ComplaintPDFLocalized(results, periodStart, periodEnd, offer, profile, assessment, contact, "en")
+}
+
+func ComplaintPDFLocalized(results []measurement.Result, periodStart, periodEnd time.Time, offer *plan.Offer, profile complaint.Profile, assessment complaint.Assessment, contact complaint.SupportContact, language string) ([]byte, error) {
+	r, err := newReportPDF(language)
 	if err != nil {
 		return nil, err
 	}
@@ -68,13 +81,27 @@ func ComplaintPDF(results []measurement.Result, periodStart, periodEnd time.Time
 	return r.bytes()
 }
 
-func newReportPDF() (*reportPDF, error) {
+func newReportPDF(language string) (*reportPDF, error) {
 	pdf := &gopdf.GoPdf{}
 	pdf.Start(gopdf.Config{PageSize: *gopdf.PageSizeA4})
 	if err := pdf.AddTTFFontData("GoRegular", goregular.TTF); err != nil {
 		return nil, err
 	}
 	if err := pdf.AddTTFFontData("GoBold", gobold.TTF); err != nil {
+		return nil, err
+	}
+	if regular, err := reportAssets.ReadFile("fonts/NotoSansDevanagari-Regular.ttf"); err == nil {
+		if err := pdf.AddTTFFontData("NotoDevanagariRegular", regular); err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, err
+	}
+	if bold, err := reportAssets.ReadFile("fonts/NotoSansDevanagari-Bold.ttf"); err == nil {
+		if err := pdf.AddTTFFontData("NotoDevanagariBold", bold); err != nil {
+			return nil, err
+		}
+	} else {
 		return nil, err
 	}
 	logoPNG, err := reportAssets.ReadFile("fiberpulse-mark.png")
@@ -85,7 +112,7 @@ func newReportPDF() (*reportPDF, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode embedded report logo: %w", err)
 	}
-	return &reportPDF{pdf: pdf, logo: logo, pageWidth: 595.28, pageHeight: 841.89, margin: 42}, nil
+	return &reportPDF{pdf: pdf, logo: logo, language: localization.Normalize(language), pageWidth: 595.28, pageHeight: 841.89, margin: 42}, nil
 }
 
 func renderPerformanceReport(r *reportPDF, results []measurement.Result, periodStart, periodEnd time.Time, offer *plan.Offer) {
@@ -121,6 +148,7 @@ type reportPDF struct {
 	pageHeight float64
 	margin     float64
 	y          float64
+	language   string
 }
 
 func (r *reportPDF) drawComplaintCover(profile complaint.Profile, offer *plan.Offer, assessment complaint.Assessment, contact complaint.SupportContact) {
@@ -502,6 +530,13 @@ func (r *reportPDF) fillRect(x, y, width, height float64, red, green, blue uint8
 
 func (r *reportPDF) setFont(name string, size float64) {
 	if r.err == nil {
+		if r.language == "hi" {
+			if name == "GoBold" {
+				name = "NotoDevanagariBold"
+			} else {
+				name = "NotoDevanagariRegular"
+			}
+		}
 		r.err = r.pdf.SetFont(name, "", size)
 	}
 }
@@ -516,6 +551,7 @@ func (r *reportPDF) text(x, y float64, value string) {
 	if r.err != nil {
 		return
 	}
+	value = localizeReportText(value, r.language)
 	r.pdf.SetXY(x, y)
 	r.err = r.pdf.Text(value)
 }
@@ -524,6 +560,7 @@ func (r *reportPDF) textRight(right, y float64, value string) {
 	if r.err != nil {
 		return
 	}
+	value = localizeReportText(value, r.language)
 	width, err := r.pdf.MeasureTextWidth(value)
 	if err != nil {
 		r.err = err
@@ -536,6 +573,7 @@ func (r *reportPDF) wrappedText(x, y, width, lineHeight float64, value string) f
 	if r.err != nil {
 		return 0
 	}
+	value = localizeReportText(value, r.language)
 	lines, err := r.pdf.SplitText(value, width)
 	if err != nil {
 		r.err = err

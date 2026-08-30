@@ -459,9 +459,20 @@ Décision : ADR 0001 (critères) + ADR 0002 (toutes les vagues fusionnées) dans
 - Internationalisation de l’app : interface embarquée disponible hors ligne en anglais, français, allemand, espagnol, portugais du Brésil, italien et hindi (`dashboard/src/i18n.ts`). La langue du système est détectée au premier lancement ; un sélecteur dans Réglages conserve ensuite le choix localement. La langue sélectionnée est aussi enregistrée dans les événements de consentement M-Lab/FiberPulse.
 - Site : section « Coverage » avec drapeaux (`components/coverage-section.tsx`), données synchronisées par `npm run sync:catalog` depuis la plateforme. La page produit et la politique de confidentialité disposent de routes indexables en anglais, français, allemand, espagnol, portugais du Brésil, italien et hindi (`/`, `/fr`, `/de`, `/es`, `/pt-br`, `/it`, `/hi` et leurs routes `/privacy`), avec langue du document, URL canonique, `hreflang` et sitemap multilingue.
 - Veille mensuelle automatisée (automatisation Codex `fiberpulse-catalog-watch`, le 1er de chaque mois) : revérifier les pages officielles, valider humainement, mettre à jour puis synchroniser agent et site.
-- Reste à faire : localiser les modèles PDF/e-mail générés côté Go (l’interface de l’app est traduite, mais le contenu des rapports reste anglais) ; seuils de comparaison par pays (Ofcom « average », TKG §58, ARCEP 60 %) ; revue RGPD de l’observatoire par pays ; compléter les gaps listés dans `fiberpulse-platform/data/catalog/README.md`.
+- Les exports PDF, CSV, le brouillon de réclamation et l’e-mail `.eml` suivent désormais la langue active. Hindi utilise les polices embarquées Noto Sans Devanagari sous licence OFL. Les noms officiels des offres et les valeurs saisies par l’abonné ne sont jamais traduits.
+- Reste à faire : seuils de comparaison par pays (Ofcom « average », TKG §58, ARCEP 60 %) ; revue juridique de l’observatoire par pays avant une communication marketing ; compléter les gaps listés dans `fiberpulse-platform/data/catalog/README.md`.
 
-## 15. Critères de fin pour la prochaine reprise
+## 15. Observatoire o2switch et flux public (30/08/2026)
+
+- L’application conserve le trajet du test directement entre le client et M-Lab. Après consentement séparé au partage public, elle transmet uniquement l’événement public minimisé à `https://testspeednow.com/api/v1/measurements`.
+- Les requêtes sont liées à une clé locale Ed25519 et protégées par signature du corps, horodatage de cinq minutes, nonce UUID, séquence monotone, idempotence et limite horaire. L’identifiant technique d’installation n’est jamais exposé par l’API publique.
+- Le récepteur o2switch est dans `fiberpulse-site/deploy/o2switch/api/v1/index.php`. Il utilise PHP Sodium et PDO SQLite. La base `observatory.sqlite` est créée dans `fiberpulse-private`, au-dessus du docroot, avec permissions de répertoire privées.
+- Aucun nom, e-mail, téléphone, numéro de compte, adresse exacte, IP exacte, GPS, SSID, hostname ou profil d’appareil n’est accepté ni stocké dans le schéma public.
+- `fiberpulse-site/deploy/o2switch/api/observatory/index.php` fournit mesures paginées, facettes pays/fournisseurs et agrégats par pays. Le site interroge ce flux toutes les 15 secondes, annonce le nouveau test anonymement et met la nouvelle ligne en lumière. `prefers-reduced-motion` désactive l’animation.
+- L’interface de l’observatoire est disponible dans les sept langues du site, y compris les états de chargement, d’erreur et de données vides. Les anciennes fausses lignes de démonstration ont été retirées.
+- Test local prouvé : inscription → signature Ed25519 → insertion SQLite → lecture publique. Les capacités `pdo_sqlite` et `sodium` doivent aussi être vérifiées sur l’hébergement réel via `/api/v1/health` après chaque déploiement.
+
+## 16. Critères de fin pour la prochaine reprise
 
 Ne considérer la distribution comme terminée que si :
 

@@ -19,6 +19,7 @@ import (
 	"fiberpulse.dev/agent/internal/health"
 	"fiberpulse.dev/agent/internal/incidents"
 	"fiberpulse.dev/agent/internal/localapi"
+	"fiberpulse.dev/agent/internal/localization"
 	"fiberpulse.dev/agent/internal/measurement"
 	"fiberpulse.dev/agent/internal/network"
 	"fiberpulse.dev/agent/internal/plan"
@@ -39,6 +40,7 @@ const connectivityRuntimeSetting = "connectivity_runtime_v1"
 const planSelectionSetting = "plan_selection_v1"
 const subscriberProfileSetting = "subscriber_profile_v1"
 const sharingIdentitySetting = "sharing_identity_v1"
+const interfaceLanguageSetting = "interface_language_v1"
 
 // PlanState exposes the subscriber's chosen ISP offer and, once a complete
 // measurement exists, how that measurement compares with the advertised plan.
@@ -396,8 +398,16 @@ func (a *App) currentComplaint(ctx context.Context, results []measurement.Result
 		contact.Phone = profile.SupportPhoneOverride
 	}
 	assessment := complaint.Assess(results, offer, profile, now)
-	draft := complaint.BuildDraft(profile, offer, contact, assessment)
+	draft := complaint.BuildDraftLocalized(profile, offer, contact, assessment, a.interfaceLanguage(ctx))
 	return ComplaintState{Profile: profile, Contact: contact, Assessment: assessment, Draft: draft}, nil
+}
+
+func (a *App) interfaceLanguage(ctx context.Context) string {
+	var language string
+	if found, err := a.store.GetSetting(ctx, interfaceLanguageSetting, &language); err == nil && found {
+		return localization.Normalize(language)
+	}
+	return localization.Default
 }
 
 // currentPlan resolves the persisted plan selection and, when a complete
@@ -445,6 +455,17 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 			return err
 		}
 		return a.SetPaused(ctx, body.Paused)
+	case "language":
+		var body struct {
+			Language string `json:"language"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return err
+		}
+		if !localization.Supported(body.Language) {
+			return errors.New("unsupported interface language")
+		}
+		return a.store.SetSetting(ctx, interfaceLanguageSetting, localization.Normalize(body.Language))
 	case "consent":
 		var body struct {
 			Scope    string `json:"scope"`
@@ -748,9 +769,10 @@ func (a *App) Export(ctx context.Context, format string) ([]byte, string, error)
 	}
 	var body []byte
 	var contentType string
+	language := localization.FromContext(ctx)
 	switch format {
 	case "csv":
-		body, err = reporting.CSV(results)
+		body, err = reporting.CSVLocalized(results, language)
 		contentType = "text/csv; charset=utf-8"
 	case "pdf":
 		var selectedOffer *plan.Offer
@@ -758,7 +780,7 @@ func (a *App) Export(ctx context.Context, format string) ([]byte, string, error)
 			offer := selected.Offer
 			selectedOffer = &offer
 		}
-		body, err = reporting.PDFWithPlan(results, report.PeriodStart, report.PeriodEnd, selectedOffer)
+		body, err = reporting.PDFWithPlanLocalized(results, report.PeriodStart, report.PeriodEnd, selectedOffer, language)
 		contentType = "application/pdf"
 	}
 	if err != nil {
@@ -807,7 +829,7 @@ func (a *App) exportComplaint(ctx context.Context, format string) ([]byte, strin
 		selected := planState.Offer
 		offer = &selected
 	}
-	pdf, err := reporting.ComplaintPDF(results, state.Assessment.WindowStart, state.Assessment.WindowEnd, offer, state.Profile, state.Assessment, state.Contact)
+	pdf, err := reporting.ComplaintPDFLocalized(results, state.Assessment.WindowStart, state.Assessment.WindowEnd, offer, state.Profile, state.Assessment, state.Contact, localization.FromContext(ctx))
 	if err != nil {
 		return nil, "", err
 	}

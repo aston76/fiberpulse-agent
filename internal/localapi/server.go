@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"fiberpulse.dev/agent/internal/localization"
 )
 
 //go:embed web/*
@@ -178,7 +180,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	format := strings.TrimPrefix(r.URL.Path, "/api/v1/export/")
-	body, contentType, err := s.controller.Export(r.Context(), format)
+	body, contentType, err := s.controller.Export(localization.WithLanguage(r.Context(), r.URL.Query().Get("language")), format)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "export.failed")
 		return
