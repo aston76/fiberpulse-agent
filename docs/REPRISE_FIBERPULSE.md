@@ -447,7 +447,18 @@ Une réussite CI locale ou sur une ancienne archive ne suffit pas pour publier. 
 9. Tester la procédure manuelle Mac avec un compte utilisateur propre et Gatekeeper actif.
 10. Raccorder l’observatoire seulement lorsque le backend, le consentement et la minimisation des données sont validés.
 
-## 14. Critères de fin pour la prochaine reprise
+## 14. Extension multi-pays (décidé le 30/08/2026)
+
+Décision et critères complets : `fiberpulse-methodology/adr/0001-country-rollout-v1.md`.
+
+- Vague 1 : États-Unis, Royaume-Uni, Allemagne, France, Australie, en plus des Philippines existantes.
+- Vague 2 différée : Canada, Suisse, Espagne, Brésil, Inde.
+- Exclus délibérément : Japon, Corée, Singapour, pays nordiques, marchés à très faible ARPU.
+- Le catalogue des offres FAI devient une **donnée**, pas du code : contrat `plan-catalog-v1` dans methodology, données canoniques dans `fiberpulse-platform/data/catalog/<pays>.json`, l’agent garde un instantané embarqué rafraîchi à chaque release.
+- Seeds vérifiés le 30/08/2026 : `us.json` (18 offres, 5 FAI) et `uk.json` (18 offres, 5 FAI). Prix promotionnels à revérifier avant toute publication ; la veille hebdomadaire (fetch + diff + validation humaine) est décrite dans `fiberpulse-platform/data/catalog/README.md`.
+- Travaux restants avant lancement multi-pays : catalogues DE/FR/AU, localisation allemande de l’interface, sélecteur de pays dans l’agent, seuils de comparaison par pays (Ofcom « average », TKG §58, ARCEP 60 %), revue RGPD de l’observatoire par pays.
+
+## 15. Critères de fin pour la prochaine reprise
 
 Ne considérer la distribution comme terminée que si :
 
