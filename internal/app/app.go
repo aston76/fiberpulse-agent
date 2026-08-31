@@ -78,43 +78,44 @@ type Config struct {
 }
 
 type App struct {
-	config       Config
-	store        *storage.Store
-	inspector    network.Inspector
-	health       health.Checker
-	local        *localapi.Server
-	scheduler    scheduler.Scheduler
-	schedulerMu  sync.Mutex
-	sharingMu    sync.Mutex
-	connectMu    sync.Mutex
-	ctx          context.Context
-	cancel       context.CancelFunc
-	mu           sync.RWMutex
-	lifecycle    LifecycleMachine
-	testMachine  measurement.TestMachine
-	schedule     scheduler.Machine
-	shareState   sharing.Machine
-	connectivity health.ConnectivityMachine
-	paused       bool
-	nextRun      time.Time
-	lastHealth   health.Sample
-	lastError    string
-	incidentMu   sync.Mutex
-	incident     incidents.Machine
-	current      incidents.Record
-	testMu       sync.Mutex
-	testKind     scheduler.Kind
-	testProgress measurement.Progress
-	updateClient *update.Client
-	updateConfig *UpdateConfig
-	updateNow    func() time.Time
-	updateMu     sync.Mutex
-	updateStatus UpdateStatus
-	wg           sync.WaitGroup
-	closing      bool
-	closeOnce    sync.Once
-	closeErr     error
-	shareWake    chan struct{}
+	config        Config
+	store         *storage.Store
+	inspector     network.Inspector
+	health        health.Checker
+	local         *localapi.Server
+	scheduler     scheduler.Scheduler
+	schedulerMu   sync.Mutex
+	sharingMu     sync.Mutex
+	connectMu     sync.Mutex
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mu            sync.RWMutex
+	lifecycle     LifecycleMachine
+	testMachine   measurement.TestMachine
+	schedule      scheduler.Machine
+	shareState    sharing.Machine
+	connectivity  health.ConnectivityMachine
+	paused        bool
+	nextRun       time.Time
+	lastHealth    health.Sample
+	lastError     string
+	incidentMu    sync.Mutex
+	incident      incidents.Machine
+	current       incidents.Record
+	testMu        sync.Mutex
+	testKind      scheduler.Kind
+	testProgress  measurement.Progress
+	updateClient  *update.Client
+	updateConfig  *UpdateConfig
+	updateNow     func() time.Time
+	updateMu      sync.Mutex
+	updateStatus  UpdateStatus
+	updatePending *pendingUpdate
+	wg            sync.WaitGroup
+	closing       bool
+	closeOnce     sync.Once
+	closeErr      error
+	shareWake     chan struct{}
 }
 
 type persistedSharingIdentity struct {
@@ -329,6 +330,12 @@ func (a *App) runAsync(fn func()) {
 
 func (a *App) BootstrapURL() string { return a.local.BootstrapURL() }
 
+func (a *App) Paused() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.paused
+}
+
 func (a *App) Snapshot(ctx context.Context) (any, error) {
 	mlab, err := a.store.CurrentConsent(ctx, "mlab")
 	if err != nil {
@@ -447,6 +454,8 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 		return a.StartTest(ctx, scheduler.Manual)
 	case "update-check":
 		return a.CheckForUpdate(ctx)
+	case "update-install":
+		return a.ApplyUpdate(ctx)
 	case "pause":
 		var body struct {
 			Paused bool `json:"paused"`

@@ -41,6 +41,7 @@ $manifest = $manifestTemplate.Replace('__FIBERPULSE_VERSION__', $Version)
 
 Copy-Item -LiteralPath $resolvedBinary -Destination (Join-Path $stage 'fiberpulse.exe')
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'LICENSE') -Destination (Join-Path $stage 'LICENSE.txt')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'FiberPulse.ico') -Destination (Join-Path $stage 'FiberPulse.ico')
 Copy-Item -Path (Join-Path $PSScriptRoot 'Assets\*.png') -Destination (Join-Path $stage 'Assets')
 
 $outputDirectory = Split-Path -Parent $OutputPath
@@ -70,6 +71,7 @@ foreach ($required in @(
   'AppxManifest.xml',
   'fiberpulse.exe',
   'LICENSE.txt',
+  'FiberPulse.ico',
   'Assets\StoreLogo.png',
   'Assets\Square44x44Logo.png',
   'Assets\Square150x150Logo.png'

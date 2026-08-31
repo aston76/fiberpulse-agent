@@ -72,6 +72,11 @@ type persistedUpdateGuard struct {
 	AttemptedAt time.Time `json:"attempted_at"`
 }
 
+type pendingUpdate struct {
+	manifest update.Manifest
+	raw      []byte
+}
+
 func (a *App) configureUpdates(config *UpdateConfig) error {
 	if config == nil {
 		a.updateStatus = UpdateStatus{Status: updateStatusDisabled, CurrentVersion: a.config.Version}
@@ -119,15 +124,49 @@ func (a *App) configureUpdates(config *UpdateConfig) error {
 	return nil
 }
 
-// CheckForUpdate runs an operator-triggered check. When a newer signed
-// release exists and no measurement is running, it is downloaded and
-// installed immediately; the agent then restarts into the new version.
+// CheckForUpdate discovers a newer signed release but never installs it. The
+// user must explicitly accept the exact current-to-available version change
+// through ApplyUpdate.
 func (a *App) CheckForUpdate(ctx context.Context) error {
 	if a.updateClient == nil {
 		return errors.New("automatic updates are not configured in this build")
 	}
 	_, err := a.runUpdateCheck(ctx, true)
 	return err
+}
+
+// ApplyUpdate installs the exact signed candidate most recently discovered by
+// CheckForUpdate. Keeping discovery and installation separate prevents a
+// button labelled "check" from unexpectedly restarting the application.
+func (a *App) ApplyUpdate(ctx context.Context) error {
+	if a.updateClient == nil {
+		return errors.New("automatic updates are not configured in this build")
+	}
+	if a.measurementActive() {
+		return ErrMeasurementBusy
+	}
+	a.updateMu.Lock()
+	pending := a.updatePending
+	if pending != nil {
+		copy := *pending
+		copy.raw = append([]byte(nil), pending.raw...)
+		pending = &copy
+	}
+	a.updateMu.Unlock()
+	if pending == nil {
+		return errors.New("no verified update is ready to install; check for updates first")
+	}
+	blocked, err := a.updateGuardBlocks(ctx, pending.manifest.Version)
+	if err != nil {
+		a.setUpdateStatus(updateStatusError, pending.manifest.Version, err)
+		return err
+	}
+	if blocked {
+		err := fmt.Errorf("update to %s is temporarily blocked after an unsuccessful attempt; retry after the safety window", pending.manifest.Version)
+		a.setUpdateStatus(updateStatusError, pending.manifest.Version, err)
+		return err
+	}
+	return a.installCandidate(ctx, pending.manifest, pending.raw)
 }
 
 // updateBusy reports whether an update transfer or install is using the line;
@@ -144,6 +183,9 @@ func (a *App) currentUpdateStatus() UpdateStatus {
 	return a.updateStatus
 }
 
+// UpdateStatus returns a copy safe for native shell integrations.
+func (a *App) UpdateStatus() UpdateStatus { return a.currentUpdateStatus() }
+
 func (a *App) setUpdateStatus(status string, available string, err error) {
 	a.updateMu.Lock()
 	defer a.updateMu.Unlock()
@@ -157,6 +199,22 @@ func (a *App) setUpdateStatus(status string, available string, err error) {
 	if status == updateStatusUpToDate || status == updateStatusAvailable {
 		a.updateStatus.CheckedAt = a.updateNow().UTC()
 	}
+}
+
+func (a *App) setPendingUpdate(manifest update.Manifest, raw []byte) {
+	a.updateMu.Lock()
+	defer a.updateMu.Unlock()
+	a.updatePending = &pendingUpdate{manifest: manifest, raw: append([]byte(nil), raw...)}
+	a.updateStatus.Status = updateStatusAvailable
+	a.updateStatus.AvailableVersion = manifest.Version
+	a.updateStatus.CheckedAt = a.updateNow().UTC()
+	a.updateStatus.Error = ""
+}
+
+func (a *App) clearPendingUpdate() {
+	a.updateMu.Lock()
+	a.updatePending = nil
+	a.updateMu.Unlock()
 }
 
 // tryStartUpdateCheck enforces a single in-flight check or install.
@@ -219,6 +277,7 @@ func (a *App) runUpdateCheck(ctx context.Context, manual bool) (time.Duration, e
 	}
 	manifest, raw, err := a.updateClient.Check(ctx, state)
 	if errors.Is(err, update.ErrNoUpdate) {
+		a.clearPendingUpdate()
 		a.setUpdateStatus(updateStatusUpToDate, "", nil)
 		return 0, nil
 	}
@@ -226,22 +285,20 @@ func (a *App) runUpdateCheck(ctx context.Context, manual bool) (time.Duration, e
 		a.setUpdateStatus(updateStatusError, "", err)
 		return 0, err
 	}
-	if !manual {
-		blocked, guardErr := a.updateGuardBlocks(ctx, manifest.Version)
-		if guardErr != nil {
-			a.setUpdateStatus(updateStatusError, "", guardErr)
-			return 0, guardErr
-		}
-		if blocked {
-			a.setUpdateStatus(updateStatusError, manifest.Version, fmt.Errorf("update to %s did not complete after the last attempt; retrying after the safety window", manifest.Version))
-			return 0, nil
-		}
+	if manual {
+		a.setPendingUpdate(manifest, raw)
+		return 0, nil
+	}
+	blocked, guardErr := a.updateGuardBlocks(ctx, manifest.Version)
+	if guardErr != nil {
+		a.setUpdateStatus(updateStatusError, manifest.Version, guardErr)
+		return 0, guardErr
+	}
+	if blocked {
+		a.setUpdateStatus(updateStatusError, manifest.Version, fmt.Errorf("update to %s did not complete after the last attempt; retrying after the safety window", manifest.Version))
+		return 0, nil
 	}
 	a.setUpdateStatus(updateStatusAvailable, manifest.Version, nil)
-	if a.measurementActive() {
-		a.setUpdateStatus(updateStatusDeferred, manifest.Version, nil)
-		return updateTestRetryDelay, nil
-	}
 	return 0, a.installCandidate(ctx, manifest, raw)
 }
 
@@ -295,6 +352,7 @@ func (a *App) installCandidate(ctx context.Context, manifest update.Manifest, ra
 		return err
 	}
 	a.config.Logger.Info("update staged, restarting into the new version", "version", manifest.Version)
+	a.clearPendingUpdate()
 	// The helper waits for this process to exit before touching the install.
 	go func() {
 		time.Sleep(250 * time.Millisecond)

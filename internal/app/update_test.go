@@ -129,7 +129,7 @@ func TestUpdateStatusDisabledWithoutReleaseConfig(t *testing.T) {
 	}
 }
 
-func TestManualUpdateCheckDownloadsStagesAndRestarts(t *testing.T) {
+func TestManualUpdateRequiresExplicitApprovalBeforeInstall(t *testing.T) {
 	feed := newUpdateFeedServer(t, "1.2.0", 9)
 	recorder := &spawnRecorder{}
 	a := newUpdateTestApp(t, feed, recorder, nil)
@@ -137,11 +137,17 @@ func TestManualUpdateCheckDownloadsStagesAndRestarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := a.currentUpdateStatus()
-	if status.Status != updateStatusInstalling || status.AvailableVersion != "1.2.0" {
+	if status.Status != updateStatusAvailable || status.AvailableVersion != "1.2.0" {
 		t.Fatalf("status=%+v", status)
 	}
+	if recorder.called() {
+		t.Fatal("checking for updates must not install without approval")
+	}
+	if err := a.ApplyUpdate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if !recorder.called() {
-		t.Fatal("updater helper was not spawned")
+		t.Fatal("approved updater helper was not spawned")
 	}
 	joined := strings.Join(recorder.args, " ")
 	for _, fragment := range []string{"-kind file", "-wait-pid", "-current-version 1.0.0", "-channel stable"} {
@@ -180,6 +186,9 @@ func TestBundleUpdatePassesBundleLayoutToHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := a.CheckForUpdate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ApplyUpdate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(recorder.args, " ")
@@ -247,16 +256,13 @@ func TestUpdateGuardBlocksRepeatedInstallOfSameVersion(t *testing.T) {
 	if recorder.called() {
 		t.Fatal("guarded version was installed again automatically")
 	}
-	if err := a.CheckForUpdate(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !recorder.called() {
-		t.Fatal("operator-triggered update did not bypass the safety guard")
-	}
-	select {
-	case <-a.Done():
-	case <-time.After(3 * time.Second):
-		t.Fatal("agent did not begin its restart after the operator update")
+}
+
+func TestApplyUpdateRequiresDiscoveredCandidate(t *testing.T) {
+	feed := newUpdateFeedServer(t, "1.0.0", 9)
+	a := newUpdateTestApp(t, feed, &spawnRecorder{}, nil)
+	if err := a.ApplyUpdate(context.Background()); err == nil || !strings.Contains(err.Error(), "check for updates first") {
+		t.Fatalf("apply without candidate: %v", err)
 	}
 }
 

@@ -124,12 +124,30 @@ func run() error {
 			}
 		},
 		Report: func() { _ = platform.OpenURL(agent.BootstrapURL()) },
-		Update: func() {
+		CheckUpdate: func() {
 			go func() {
 				if err := agent.CheckForUpdate(context.Background()); err != nil {
 					logger.Info("manual update check", "error", err)
 				}
+				status := agent.UpdateStatus()
+				state := platform.TrayState{Version: status.CurrentVersion, Paused: agent.Paused(), UpdateStatus: status.Status, AvailableVersion: status.AvailableVersion, UpdateError: status.Error}
+				if platform.PresentUpdateResult(state) {
+					if err := agent.ApplyUpdate(context.Background()); err != nil {
+						logger.Warn("approved update install failed", "error", err)
+					}
+				}
 			}()
+		},
+		InstallUpdate: func() {
+			go func() {
+				if err := agent.ApplyUpdate(context.Background()); err != nil {
+					logger.Warn("update install failed", "error", err)
+				}
+			}()
+		},
+		State: func() platform.TrayState {
+			status := agent.UpdateStatus()
+			return platform.TrayState{Version: status.CurrentVersion, Paused: agent.Paused(), UpdateStatus: status.Status, AvailableVersion: status.AvailableVersion, UpdateError: status.Error}
 		},
 		Quit: func() { _ = agent.Action(context.Background(), "quit", []byte(`{}`)) },
 	}
