@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-version="${FIBERPULSE_VERSION:-0.1.1-dev}"
+version="${FIBERPULSE_VERSION:-0.1.2-dev}"
 share_url="${FIBERPULSE_SHARE_URL:-}"
 update_feed_url="${FIBERPULSE_UPDATE_FEED_URL:-}"
 update_public_key="${FIBERPULSE_UPDATE_PUBLIC_KEY:-}"
@@ -9,7 +9,7 @@ output_root="${1:-dist/macos}"
 app_path="${output_root}/FiberPulse.app"
 deployment_target="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 signing_identity="${FIBERPULSE_CODESIGN_IDENTITY:--}"
-build_number="${FIBERPULSE_BUILD_NUMBER:-1}"
+build_number="${FIBERPULSE_BUILD_NUMBER:-4}"
 build_root="$(mktemp -d "${TMPDIR:-/tmp}/fiberpulse-macos-build.XXXXXX")"
 
 cleanup() {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fiberpulse.dev/agent/internal/accountsync"
+	"fiberpulse.dev/agent/internal/measurement"
 )
 
 func (a *App) accountStatus(ctx context.Context) AccountStatus {
@@ -136,10 +137,31 @@ func (a *App) syncAccount(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := a.accountClient.Upload(ctx, saved.AccessToken, results); err != nil {
+	remoteResults, err := a.accountClient.Measurements(ctx, saved.AccessToken)
+	if err != nil {
 		saved.LastError = "Measurements could not be synchronized. FiberPulse will retry automatically."
 		_ = a.store.SetSetting(context.Background(), accountConnectionSetting, saved)
 		return err
+	}
+	remoteIDs := make(map[string]struct{}, len(remoteResults))
+	for _, result := range remoteResults {
+		remoteIDs[result.ID] = struct{}{}
+	}
+	pendingUploads := make([]measurement.Result, 0, len(results))
+	for _, result := range results {
+		if _, exists := remoteIDs[result.ID]; !exists {
+			pendingUploads = append(pendingUploads, result)
+		}
+	}
+	if err := a.accountClient.Upload(ctx, saved.AccessToken, pendingUploads); err != nil {
+		saved.LastError = "Measurements could not be synchronized. FiberPulse will retry automatically."
+		_ = a.store.SetSetting(context.Background(), accountConnectionSetting, saved)
+		return err
+	}
+	for _, result := range remoteResults {
+		if _, err := a.store.SaveResultIfAbsent(ctx, result); err != nil {
+			return fmt.Errorf("import synchronized measurement %s: %w", result.ID, err)
+		}
 	}
 	saved.Email = account.Email
 	saved.Plan = account.Plan

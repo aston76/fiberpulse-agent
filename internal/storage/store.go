@@ -129,19 +129,34 @@ func (s *Store) Backup(ctx context.Context, destination string) error {
 }
 
 func (s *Store) SaveResult(ctx context.Context, r measurement.Result) error {
+	_, err := s.saveResult(ctx, r, false)
+	return err
+}
+
+// SaveResultIfAbsent imports an account-synchronized result without replacing a
+// local original that has the same stable measurement identifier.
+func (s *Store) SaveResultIfAbsent(ctx context.Context, r measurement.Result) (bool, error) {
+	return s.saveResult(ctx, r, true)
+}
+
+func (s *Store) saveResult(ctx context.Context, r measurement.Result, ignoreExisting bool) (bool, error) {
 	before, err := json.Marshal(r.NetworkBefore)
 	if err != nil {
-		return err
+		return false, err
 	}
 	after, err := json.Marshal(r.NetworkAfter)
 	if err != nil {
-		return err
+		return false, err
 	}
 	reasons, err := json.Marshal(r.ConfidenceReasons)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO performance_tests(
+	insert := "INSERT INTO performance_tests("
+	if ignoreExisting {
+		insert = "INSERT OR IGNORE INTO performance_tests("
+	}
+	result, err := s.db.ExecContext(ctx, insert+`
 		id,provider,protocol_version,client_version,schema_version,methodology_version,confidence_version,
 		started_at,completed_at,server_fqdn,download_bps,upload_bps,min_rtt_us,bytes_down,bytes_up,
 		download_duration_us,upload_duration_us,status,error_code,error_detail,network_before_json,
@@ -151,7 +166,11 @@ func (s *Store) SaveResult(ctx context.Context, r measurement.Result) error {
 		formatTime(r.StartedAt), formatTime(r.CompletedAt), r.ServerFQDN, r.DownloadBPS, r.UploadBPS, r.MinRTTUS,
 		r.BytesDown, r.BytesUp, r.DownloadDurationUS, r.UploadDurationUS, r.Status, r.ErrorCode, r.ErrorDetail,
 		string(before), string(after), r.ConfidenceScore, r.ConfidenceLevel, string(reasons), boolInt(r.PublicEligible))
-	return err
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
 }
 
 func (s *Store) ListResults(ctx context.Context, limit int) ([]measurement.Result, error) {

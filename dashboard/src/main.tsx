@@ -42,13 +42,13 @@ const countryFlag = (code = "") => {
 // advertisedLabel words the plan speed the way it is legally marketed:
 // "up to" in most countries, "average" under the UK Ofcom rule and a
 // "typical" floor for fixed-wireless offers.
-const advertisedLabel = (offer?: PlanOffer | null, advertisedMbps?: number) => {
+const advertisedLabel = (offer?: PlanOffer | null, advertisedMbps?: number, translate: (source: string) => string = source => source) => {
 	if (!offer) return "";
 	const speed = advertisedMbps || offer.download_mbps;
 	switch (offer.advertised_speed_basis) {
-		case "average": return "Average " + speed + " Mbps";
-		case "typical": return "Typically " + speed + "+ Mbps";
-		default: return "Up to " + speed + " Mbps";
+		case "average": return translate("Average") + " " + speed + " Mbps";
+		case "typical": return translate("Typically") + " " + speed + "+ Mbps";
+		default: return translate("Up to") + " " + speed + " Mbps";
 	}
 };
 const words = (value = "unknown") => value.replaceAll("_", " ");
@@ -351,7 +351,7 @@ function ComplaintModal({ complaint, onClose, onCopy }: { complaint: ComplaintSt
 }
 
 function App() {
-  const { locale, setLocale } = useLocale();
+  const { locale, setLocale, t } = useLocale();
   const { envelope, error, refresh, action } = useStatus();
   const [actionError, setActionError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -386,14 +386,14 @@ function App() {
   const verdict = planState?.verdict;
   const planTone = !verdict ? "cyan" : verdict.level === "on_par" ? "green" : verdict.level === "below_plan" ? "amber" : "red";
   const planTitle = planState ? planState.offer.name : "Not selected";
-  const planDetail = !planState ? "Compare your results with the offer you pay for." : !verdict ? countryFlag(planState.offer.country_code) + " " + planState.offer.country_name + " · " + planState.offer.isp + " · " + advertisedLabel(planState.offer).toLowerCase() + " — run a test to compare." : verdict.summary + " · " + verdict.download_pct + "% of advertised " + verdict.advertised_download_mbps + " Mbps";
+  const planDetail = !planState ? "Compare your results with the offer you pay for." : !verdict ? countryFlag(planState.offer.country_code) + " " + planState.offer.country_name + " · " + planState.offer.isp + " · " + advertisedLabel(planState.offer, undefined, t).toLocaleLowerCase(locale) + " — " + t("Run a test to compare").toLocaleLowerCase(locale) + "." : t(verdict.summary) + " · " + verdict.download_pct + "% " + t("of advertised") + " " + verdict.advertised_download_mbps + " Mbps";
   const planPerformanceIssue = Boolean(verdict && verdict.level !== "on_par");
   const issueCount = activeIncidents.length + (planPerformanceIssue ? 1 : 0);
   const issueTone = verdict?.level === "well_below_plan" ? "red" : issueCount ? "amber" : "green";
-  const issueTitle = planPerformanceIssue ? (activeIncidents.length ? `${issueCount} issues detected` : "Speed below your plan") : activeIncidents.length ? `${activeIncidents.length} detected` : "No problem detected";
+  const issueTitle = planPerformanceIssue ? (activeIncidents.length ? `${issueCount} ${t("issues detected")}` : t("Speed below your plan")) : activeIncidents.length ? `${activeIncidents.length} ${t("detected")}` : "No problem detected";
   const issueDetail = planPerformanceIssue && verdict
-    ? `${mbps(latest?.download_bps)} Mbps measured · ${verdict.download_pct}% of your ${verdict.advertised_download_mbps} Mbps plan${activeIncidents.length ? ` · plus ${activeIncidents.length} network incident${activeIncidents.length === 1 ? "" : "s"}` : ""}.`
-    : activeIncidents.length ? `Latest network incident: ${words(activeIncidents[0].category)}` : "Your recent checks and plan performance look normal.";
+    ? `${mbps(latest?.download_bps)} ${t("Mbps measured")} · ${verdict.download_pct}% ${t("of your")} ${verdict.advertised_download_mbps} ${t("Mbps plan")}${activeIncidents.length ? ` · ${t("plus")} ${activeIncidents.length} ${t(activeIncidents.length === 1 ? "network incident" : "network incidents")}` : ""}.`
+    : activeIncidents.length ? `${t("Latest network incident")}: ${t(words(activeIncidents[0].category))}` : "Your recent checks and plan performance look normal.";
   const networkTone = network.vpn_suspected || network.proxy_suspected ? "danger" : network.online ? "good" : "muted";
   const confidenceTone = !latest ? "muted" : latest.confidence_score >= 80 ? "good" : latest.confidence_score >= 60 ? "warning" : "danger";
   const confidenceLabel = latest ? `${latest.confidence_score}/100` : "No test";
@@ -476,7 +476,7 @@ function App() {
         <article><span class="speed-icon ping">●</span><div><small>LATENCY</small><strong>{latency(latest?.min_rtt_us)}</strong><em>ms</em></div></article>
       </div>
       <button class="test-button" disabled={busy || !status.provider.enabled || status.test_state !== "idle"} onClick={startTest}><span>▶</span>{status.test_state === "idle" ? "Run speed test" : `Test ${words(status.test_state)}…`}</button>
-      {status.test_state === "idle" ? <p class="test-note">Measures download, upload and latency. Results stay on this device.</p> : <TestShow state={status.test_state} progress={status.test_progress} />}
+      {status.test_state === "idle" ? <p class="test-note">Measures download, upload and latency. Results are stored locally first.</p> : <TestShow state={status.test_state} progress={status.test_progress} />}
     </section>
 
     <section class="quick-grid">
@@ -490,15 +490,15 @@ function App() {
     <details class="details-card reports-hub"><summary>
       <span class="reports-summary-icon" aria-hidden="true">⌁</span>
       <span class="reports-summary-copy"><small>DIAGNOSTICS & EVIDENCE</small><b>Details and reports</b><em>Network context, confidence, incidents and exports</em></span>
-      <span class="reports-signals" aria-label="Diagnostics summary"><span class={`signal-pill ${networkTone}`}><i />{words(network.connection_type)}</span><span class={`signal-pill ${confidenceTone}`}><i />{confidenceLabel}</span><span class={`signal-pill ${issueCount ? (verdict?.level === "well_below_plan" ? "danger" : "warning") : "good"}`}><i />{issueCount} issue{issueCount === 1 ? "" : "s"}</span></span>
+      <span class="reports-signals" aria-label="Diagnostics summary"><span class={`signal-pill ${networkTone}`}><i />{t(words(network.connection_type))}</span><span class={`signal-pill ${confidenceTone}`}><i />{confidenceLabel}</span><span class={`signal-pill ${issueCount ? (verdict?.level === "well_below_plan" ? "danger" : "warning") : "good"}`}><i />{issueCount} issue{issueCount === 1 ? "" : "s"}</span></span>
       <i class="reports-chevron">⌄</i>
     </summary><div class="details-content">
-      <div class="details-intro"><div><p class="eyebrow">Connection intelligence</p><h2>Your diagnostic workspace</h2><p>Understand the conditions behind each measurement and keep evidence ready when you need to speak with your provider.</p></div><span class="privacy-seal"><b>LOCAL</b><small>Your history stays on this device</small></span></div>
+      <div class="details-intro"><div><p class="eyebrow">Connection intelligence</p><h2>Your diagnostic workspace</h2><p>Understand the conditions behind each measurement and keep evidence ready when you need to speak with your provider.</p></div><span class="privacy-seal"><b>LOCAL FIRST</b><small>Your history is stored locally first</small></span></div>
       <div class="detail-grid">
         <article class="insight-card network-card"><header><span aria-hidden="true">⌁</span><div><small>CONNECTION</small><h3>Network context</h3></div><i class={`health-dot ${networkTone}`} /></header><dl><div><dt>Active link</dt><dd>{words(network.connection_type)}</dd></div><div><dt>VPN / proxy</dt><dd>{network.vpn_suspected || network.proxy_suspected ? "Suspected" : "Not detected"}</dd></div><div><dt>Metered network</dt><dd>{network.metered ? "Yes" : "No"}</dd></div></dl></article>
         <article class="insight-card result-card"><header><span aria-hidden="true">↕</span><div><small>MEASUREMENT QUALITY</small><h3>Latest result</h3></div><i class={`health-dot ${confidenceTone}`} /></header><dl><div><dt>Confidence</dt><dd>{latest ? `${latest.confidence_score}/100 · ${words(latest.confidence_level)}` : "No test"}</dd></div><div><dt>Evidence eligible</dt><dd>{latest?.public_eligible ? "Yes" : "No"}</dd></div><div><dt>Test provider</dt><dd>{status.provider.name === "development_fake" ? "Local simulation" : status.provider.name}</dd></div></dl></article>
-        <article class="insight-card baseline-card"><header><span aria-hidden="true">◫</span><div><small>PERSONAL REFERENCE</small><h3>Your baseline</h3></div><i class={`health-dot ${baseline.count >= 10 ? "good" : "muted"}`} /></header><dl><div><dt>Qualified tests</dt><dd>{baseline.count}</dd></div><div><dt>Median download</dt><dd>{baseline.count ? `${mbps(baseline.download_median_bps)} Mbps` : "Collecting data"}</dd></div><div><dt>Maturity</dt><dd>{words(baseline.maturity)}</dd></div><div><dt>Network incidents</dt><dd class={activeIncidents.length ? "text-warning" : "text-good"}>{activeIncidents.length || "None"}</dd></div></dl></article>
-        <article class="insight-card plan-card"><header><span aria-hidden="true">◇</span><div><small>SUBSCRIBED OFFER</small><h3>Plan diagnosis</h3></div><i class={`health-dot ${verdict ? (verdict.level === "on_par" ? "good" : verdict.level === "below_plan" ? "warning" : "danger") : "muted"}`} /></header>{planState ? <dl><div><dt>Country</dt><dd>{countryFlag(planState.offer.country_code) + " " + planState.offer.country_name}</dd></div><div><dt>Your offer</dt><dd>{planState.offer.isp + " · " + planState.offer.name}</dd></div><div><dt>Advertised</dt><dd>{advertisedLabel(planState.offer, verdict?.advertised_download_mbps)}</dd></div><div><dt>Latest comparison</dt><dd class={verdict?.level === "on_par" ? "text-good" : verdict ? "text-warning" : ""}>{verdict ? verdict.download_pct + "% · " + verdict.summary : "Run a test to compare"}</dd></div></dl> : <div class="plan-empty"><p>Select your provider and offer to compare measured performance with what you pay for.</p><button class="mini-button" onClick={() => setPlanOpen(true)}>Choose your plan</button></div>}</article>
+        <article class="insight-card baseline-card"><header><span aria-hidden="true">◫</span><div><small>PERSONAL REFERENCE</small><h3>Your baseline</h3></div><i class={`health-dot ${baseline.count >= 10 ? "good" : "muted"}`} /></header><dl><div><dt>Qualified tests</dt><dd>{baseline.count}</dd></div><div><dt>Median download</dt><dd>{baseline.count ? `${mbps(baseline.download_median_bps)} Mbps` : "Collecting data"}</dd></div><div><dt>Maturity</dt><dd>{t(words(baseline.maturity))}</dd></div><div><dt>Network incidents</dt><dd class={activeIncidents.length ? "text-warning" : "text-good"}>{activeIncidents.length || "None"}</dd></div></dl></article>
+        <article class="insight-card plan-card"><header><span aria-hidden="true">◇</span><div><small>SUBSCRIBED OFFER</small><h3>Plan diagnosis</h3></div><i class={`health-dot ${verdict ? (verdict.level === "on_par" ? "good" : verdict.level === "below_plan" ? "warning" : "danger") : "muted"}`} /></header>{planState ? <dl><div><dt>Country</dt><dd>{countryFlag(planState.offer.country_code) + " " + planState.offer.country_name}</dd></div><div><dt>Your offer</dt><dd>{planState.offer.isp + " · " + planState.offer.name}</dd></div><div><dt>Advertised</dt><dd>{advertisedLabel(planState.offer, verdict?.advertised_download_mbps, t)}</dd></div><div><dt>Latest comparison</dt><dd class={verdict?.level === "on_par" ? "text-good" : verdict ? "text-warning" : ""}>{verdict ? verdict.download_pct + "% · " + t(verdict.summary) : t("Run a test to compare")}</dd></div></dl> : <div class="plan-empty"><p>Select your provider and offer to compare measured performance with what you pay for.</p><button class="mini-button" onClick={() => setPlanOpen(true)}>Choose your plan</button></div>}</article>
       </div>
 	      <section class="export-panel"><div class="export-copy"><span class="export-mark" aria-hidden="true">▤</span><div><p class="eyebrow">Evidence package</p><h3>Take your results with you</h3><p>Create a polished report for your provider or download the underlying measurements for deeper analysis.</p></div></div><div class="report-actions"><button class="export-button pdf" disabled={!!exporting} onClick={() => void exportReport("pdf")}><span class="file-badge">PDF</span><span><b>{exporting === "pdf" ? "Creating report…" : "Professional report"}</b><small>Branded, readable and ready to share</small></span><i>↓</i></button><button class="export-button csv" disabled={!!exporting} onClick={() => void exportReport("csv")}><span class="file-badge">CSV</span><span><b>{exporting === "csv" ? "Preparing data…" : "Raw measurement data"}</b><small>Complete rows for your own analysis</small></span><i>↓</i></button></div></section>
 	      <section class={`complaint-panel ${assessment.complaint_ready ? "ready" : ""}`}>
@@ -517,7 +517,7 @@ function App() {
 	      {status.sponsor && status.test_state === "idle" && <aside class="sponsor-card" aria-label="Sponsored partner message"><div><small>{status.sponsor.label || "Sponsored"}</small><b>{status.sponsor.headline}</b><span>{status.sponsor.body}</span></div><a href={status.sponsor.url} target="_blank" rel="nofollow sponsored noreferrer">{status.sponsor.cta} ↗</a></aside>}
 	    </div></details>
 
-    <footer><span>FiberPulse {status.version}</span><span>Private by default · Data stored locally</span></footer>
+    <footer><span>FiberPulse {status.version}</span><span>Private by default · Local-first storage</span></footer>
 
 	    {settingsOpen && <div class="modal-backdrop"><section class="modal settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <button class="modal-close" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>×</button>

@@ -44,11 +44,17 @@ type Exchange struct {
 }
 
 type measurementPayload struct {
-	ID           string  `json:"id"`
-	MeasuredAt   string  `json:"measuredAt"`
-	DownloadMbps float64 `json:"downloadMbps"`
-	UploadMbps   float64 `json:"uploadMbps"`
-	LatencyMs    float64 `json:"latencyMs"`
+	ID           string             `json:"id"`
+	MeasuredAt   string             `json:"measuredAt"`
+	DownloadMbps float64            `json:"downloadMbps"`
+	UploadMbps   float64            `json:"uploadMbps"`
+	LatencyMs    float64            `json:"latencyMs"`
+	Result       measurement.Result `json:"result"`
+}
+
+type measurementRecord struct {
+	ID     string              `json:"id"`
+	Result *measurement.Result `json:"result"`
 }
 
 func New(baseURL string, transport http.RoundTripper) (*Client, error) {
@@ -108,11 +114,13 @@ func (c *Client) Upload(ctx context.Context, token string, results []measurement
 		if result.Status != measurement.StatusComplete || result.ID == "" || result.StartedAt.IsZero() {
 			continue
 		}
+		result = privateAccountCopy(result)
 		items = append(items, measurementPayload{
 			ID: result.ID, MeasuredAt: result.StartedAt.UTC().Format(time.RFC3339Nano),
 			DownloadMbps: float64(result.DownloadBPS) / 1_000_000,
 			UploadMbps:   float64(result.UploadBPS) / 1_000_000,
 			LatencyMs:    float64(result.MinRTTUS) / 1_000,
+			Result:       result,
 		})
 	}
 	for len(items) > 0 {
@@ -123,6 +131,63 @@ func (c *Client) Upload(ctx context.Context, token string, results []measurement
 		items = items[count:]
 	}
 	return nil
+}
+
+// Measurements returns complete private measurements previously synchronized by
+// any desktop linked to the account. Legacy server rows without a full result are
+// deliberately skipped because they cannot be restored without inventing fields.
+func (c *Client) Measurements(ctx context.Context, token string) ([]measurement.Result, error) {
+	var response struct {
+		Items []measurementRecord `json:"items"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/v1/device/measurements", token, nil, &response); err != nil {
+		return nil, err
+	}
+	results := make([]measurement.Result, 0, len(response.Items))
+	for _, item := range response.Items {
+		if item.Result == nil {
+			continue
+		}
+		result := privateAccountCopy(*item.Result)
+		if err := validateSyncedResult(item.ID, result); err != nil {
+			return nil, err
+		}
+		result.PublicEligible = false
+		if !contains(result.ConfidenceReasons, "account.synced_copy") {
+			result.ConfidenceReasons = append(result.ConfidenceReasons, "account.synced_copy")
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+func privateAccountCopy(result measurement.Result) measurement.Result {
+	result.NetworkBefore.InterfaceID = ""
+	result.NetworkBefore.RouteID = ""
+	result.NetworkAfter.InterfaceID = ""
+	result.NetworkAfter.RouteID = ""
+	result.ErrorDetail = ""
+	return result
+}
+
+func validateSyncedResult(id string, result measurement.Result) error {
+	if id == "" || result.ID != id || len(id) > 80 || result.Status != measurement.StatusComplete ||
+		result.Provider == "" || result.SchemaVersion == "" || result.MethodologyVersion == "" || result.ConfidenceVersion == "" ||
+		result.StartedAt.IsZero() || result.CompletedAt.IsZero() || result.CompletedAt.Before(result.StartedAt) ||
+		result.DownloadBPS < 0 || result.UploadBPS < 0 || result.MinRTTUS < 0 || result.BytesDown < 0 || result.BytesUp < 0 ||
+		result.DownloadDurationUS < 0 || result.UploadDurationUS < 0 || result.ConfidenceScore < 0 || result.ConfidenceScore > 100 {
+		return errors.New("account service returned an invalid synchronized measurement")
+	}
+	return nil
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 type statusError struct {
@@ -159,7 +224,10 @@ func (c *Client) request(ctx context.Context, method, path, token string, payloa
 		return err
 	}
 	defer response.Body.Close()
-	limited := io.LimitReader(response.Body, 1<<20)
+	// A synchronized account may contain up to 1,000 complete measurements.
+	// Keep the response bounded while leaving enough room for their validated
+	// JSON payloads and the surrounding envelope.
+	limited := io.LimitReader(response.Body, 20<<20)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		var problem struct {
 			Code string `json:"code"`

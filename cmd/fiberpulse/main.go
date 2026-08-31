@@ -19,7 +19,7 @@ import (
 	"fiberpulse.dev/agent/internal/sponsor"
 )
 
-var version = "0.1.1-dev"
+var version = "0.1.2-dev"
 var sharingEndpoint = ""
 var updateFeedURL = ""
 var updatePublicKey = ""

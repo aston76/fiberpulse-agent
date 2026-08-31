@@ -3,8 +3,10 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"fiberpulse.dev/agent/internal/accountsync"
 	"fiberpulse.dev/agent/internal/complaint"
 	"fiberpulse.dev/agent/internal/health"
 	"fiberpulse.dev/agent/internal/incidents"
@@ -49,6 +52,112 @@ func newTestApp(t *testing.T) *App {
 		}
 	})
 	return a
+}
+
+func TestAccountSyncUploadsLocalAndImportsRemoteHistory(t *testing.T) {
+	a := newTestApp(t)
+	started := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	result := func(id string) measurement.Result {
+		return measurement.Result{
+			ID: id, Provider: measurement.ProviderMLabNDT7, ProtocolVersion: "ndt7", ClientVersion: "0.1.2",
+			SchemaVersion: measurement.SchemaVersion, MethodologyVersion: measurement.MethodologyVersion, ConfidenceVersion: measurement.ConfidenceVersion,
+			StartedAt: started, CompletedAt: started.Add(10 * time.Second), DownloadBPS: 400_000_000, UploadBPS: 100_000_000,
+			MinRTTUS: 8_000, BytesDown: 50_000_000, BytesUp: 12_500_000, DownloadDurationUS: 5_000_000, UploadDurationUS: 5_000_000,
+			Status: measurement.StatusComplete, NetworkBefore: measurement.NetworkContext{ConnectionType: measurement.ConnectionEthernet, Online: true, CapturedAt: started},
+			NetworkAfter:    measurement.NetworkContext{ConnectionType: measurement.ConnectionEthernet, Online: true, CapturedAt: started.Add(10 * time.Second)},
+			ConfidenceScore: 97, ConfidenceLevel: "high", PublicEligible: true,
+		}
+	}
+	local := result("measurement_local_001")
+	remote := result("measurement_remote_001")
+	if err := a.store.SaveResult(context.Background(), local); err != nil {
+		t.Fatal(err)
+	}
+	uploadedLocal := false
+	uploadRequests := 0
+	storedResults := map[string]measurement.Result{remote.ID: remote}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		if request.Header.Get("Authorization") != "Bearer account-token" {
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch request.Method + " " + request.URL.Path {
+		case http.MethodGet + " /v1/device/session":
+			_, _ = response.Write([]byte(`{"email":"owner@example.com","plan":"pro","subscriptionStatus":"active","googleLinked":true}`))
+		case http.MethodPost + " /v1/device/measurements":
+			uploadRequests++
+			var payload struct {
+				Items []struct {
+					ID     string             `json:"id"`
+					Result measurement.Result `json:"result"`
+				} `json:"items"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Error(err)
+				response.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			for _, item := range payload.Items {
+				storedResults[item.ID] = item.Result
+				if item.ID == local.ID && item.Result.ID == local.ID {
+					uploadedLocal = true
+				}
+			}
+			_, _ = response.Write([]byte(`{"accepted":1}`))
+		case http.MethodGet + " /v1/device/measurements":
+			items := make([]any, 0, len(storedResults))
+			for id, stored := range storedResults {
+				items = append(items, map[string]any{"id": id, "result": stored})
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{"items": items})
+		default:
+			response.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := accountsync.New(server.URL, server.Client().Transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.accountClient = client
+	if err := a.store.SetSetting(context.Background(), accountConnectionSetting, persistedAccountConnection{AccessToken: "account-token"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.syncAccount(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !uploadedLocal {
+		t.Fatal("local measurement was not uploaded")
+	}
+	if err := a.syncAccount(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if uploadRequests != 1 {
+		t.Fatalf("unchanged history caused %d upload requests", uploadRequests)
+	}
+	results, err := a.store.ListResults(context.Background(), 10)
+	if err != nil || len(results) != 2 {
+		t.Fatalf("results=%+v err=%v", results, err)
+	}
+	for _, synced := range results {
+		if synced.ID == remote.ID && (synced.PublicEligible || !containsString(synced.ConfidenceReasons, "account.synced_copy")) {
+			t.Fatalf("remote measurement was not imported privately: %+v", synced)
+		}
+	}
+	var saved persistedAccountConnection
+	if found, err := a.store.GetSetting(context.Background(), accountConnectionSetting, &saved); err != nil || !found || saved.Email != "owner@example.com" || saved.Plan != "pro" || !saved.GoogleLinked || saved.LastSyncAt.IsZero() {
+		t.Fatalf("saved account=%+v found=%v err=%v", saved, found, err)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPauseStateNeverHidesMissingMLabConsent(t *testing.T) {

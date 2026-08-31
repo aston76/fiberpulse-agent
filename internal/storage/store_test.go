@@ -94,8 +94,18 @@ func TestStorePersistsConsentQuotaAndMeasurement(t *testing.T) {
 	if err := s.SaveResult(ctx, r); err != nil {
 		t.Fatal(err)
 	}
+	if inserted, err := s.SaveResultIfAbsent(ctx, r); err != nil || inserted {
+		t.Fatalf("duplicate synchronized result inserted=%v err=%v", inserted, err)
+	}
+	imported := r
+	imported.ID = "result-synchronized"
+	imported.PublicEligible = false
+	imported.ConfidenceReasons = []string{"account.synced_copy"}
+	if inserted, err := s.SaveResultIfAbsent(ctx, imported); err != nil || !inserted {
+		t.Fatalf("new synchronized result inserted=%v err=%v", inserted, err)
+	}
 	results, err := s.ListResults(ctx, 10)
-	if err != nil || len(results) != 1 || results[0].ID != r.ID {
+	if err != nil || len(results) != 2 || (results[0].ID != imported.ID && results[1].ID != imported.ID) {
 		t.Fatalf("results=%+v err=%v", results, err)
 	}
 	if err := s.IntegrityCheck(ctx); err != nil {
