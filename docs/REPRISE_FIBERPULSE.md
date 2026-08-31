@@ -469,6 +469,14 @@ Décision : ADR 0001 (critères) + ADR 0002 (toutes les vagues fusionnées) dans
 - L'export fixe aussi la langue réelle de `<html lang>` pour chaque route (`en`, `fr`, `de`, `es`, `pt-BR`, `it`, `hi`).
 - Preuves : lint et build réussis, export statique complet de 14 pages, QA à 320/390/768/1440 px sans débordement horizontal, détection française et choix manuel anglais vérifiés, animations testées dans le navigateur. Déploiement o2switch réussi : run `33330873047`; `/api/v1/health` conserve `storage: true`.
 
+### Parité du héros animé multilingue du 31/08/2026
+
+- Le défaut PC venait des pages localisées : la détection du navigateur envoyait correctement vers `/fr/`, mais ces routes conservaient une grande image statique alors que le héros animé complet n'existait que sur `/`.
+- Le commit site `4dce476` utilise désormais le même `HeroTestVisual` sur les sept langues. Les phases, métriques, libellés, texte de confidentialité, alternative d'image et bouton Replay sont traduits en anglais, français, allemand, espagnol, portugais du Brésil, italien et hindi.
+- Le runtime statique v2 lit les phases traduites embarquées dans chaque page ; il ne remplace plus les textes localisés par de l'anglais.
+- L'en-tête desktop utilise des colonnes intrinsèques pour garder les sept langues dans le conteneur. À 1180 px et en dessous, il passe au sélecteur compact avant qu'un débordement puisse apparaître.
+- Preuve locale et publique : faisceau, zoom d'image, impulsions, phases, progression et valeurs ont changé entre deux échantillons ; `/fr/` n'a plus de `.localized-hero-art`; aucun débordement à 1440/1180/390 px. Déploiement o2switch réussi : run `33344099103`, sans erreur ni avertissement JavaScript lors du contrôle final.
+
 ## 16. Critères de fin pour la prochaine reprise
 
 Ne considérer la distribution comme terminée que si :
