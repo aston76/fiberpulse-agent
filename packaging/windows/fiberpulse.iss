@@ -1,8 +1,8 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0-dev"
+  #define MyAppVersion "0.1.1-dev"
 #endif
 #ifndef MyAppVersionInfo
-  #define MyAppVersionInfo "0.1.0.0"
+  #define MyAppVersionInfo "0.1.1.0"
 #endif
 
 #define MyAppName "FiberPulse"

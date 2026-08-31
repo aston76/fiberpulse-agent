@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+env:
+  DEVELOPMENT_VERSION: 0.1.1-dev
+  DEVELOPMENT_VERSION_INFO: 0.1.1.0
+  DEVELOPMENT_MACOS_BUILD: 3
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -39,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Cross-build native Windows artifacts
-        run: docker build -f packaging/windows/Dockerfile.build -t fiberpulse-agent-build .
+        run: docker build -f packaging/windows/Dockerfile.build --build-arg "VERSION=$DEVELOPMENT_VERSION" -t fiberpulse-agent-build .
       - name: Extract artifacts
         run: mkdir -p dist && docker run --rm -v "$PWD/dist:/artifacts" fiberpulse-agent-build
       - name: Record checksums
@@ -79,14 +84,14 @@ jobs:
       - name: Compile development setup
         shell: pwsh
         run: |
-          & "$env:ISCC" "/DMyAppVersion=0.1.0-dev" "/DMyAppVersionInfo=0.1.0.0" "packaging\windows\fiberpulse.iss"
+          & "$env:ISCC" "/DMyAppVersion=$env:DEVELOPMENT_VERSION" "/DMyAppVersionInfo=$env:DEVELOPMENT_VERSION_INFO" "packaging\windows\fiberpulse.iss"
           if ($LASTEXITCODE -ne 0) {
             throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
           }
       - name: Install, run, quit and uninstall exact setup
         shell: pwsh
         run: |
-          $installer = Resolve-Path 'dist\FiberPulse-0.1.0-dev-windows-x64-setup.exe'
+          $installer = Resolve-Path "dist\FiberPulse-$env:DEVELOPMENT_VERSION-windows-x64-setup.exe"
           $installDir = Join-Path $env:RUNNER_TEMP 'FiberPulsePackageQA'
           $dataDir = Join-Path $env:RUNNER_TEMP 'FiberPulseDataQA'
           $install = Start-Process -FilePath $installer -ArgumentList @(
@@ -118,7 +123,7 @@ jobs:
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: fiberpulse-windows-x64-development-setup
-          path: dist/FiberPulse-0.1.0-dev-windows-x64-setup.exe
+          path: dist/FiberPulse-${{ env.DEVELOPMENT_VERSION }}-windows-x64-setup.exe
 
   windows-msix:
     needs: windows-x64
@@ -131,11 +136,11 @@ jobs:
           path: dist
       - name: Build and verify Microsoft Store MSIX
         shell: pwsh
-        run: .\packaging\windows\build-msix.ps1 -Version 0.1.0.0
+        run: .\packaging\windows\build-msix.ps1 -Version $env:DEVELOPMENT_VERSION_INFO
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: fiberpulse-windows-x64-store-msix
-          path: dist/FiberPulse-0.1.0.0-windows-x64.msix
+          path: dist/FiberPulse-${{ env.DEVELOPMENT_VERSION_INFO }}-windows-x64.msix
           if-no-files-found: error
 
   macos:
@@ -150,6 +155,9 @@ jobs:
           go-version: 1.26.7
           cache: true
       - name: Test macOS build
+        env:
+          FIBERPULSE_VERSION: ${{ env.DEVELOPMENT_VERSION }}
+          FIBERPULSE_BUILD_NUMBER: ${{ env.DEVELOPMENT_MACOS_BUILD }}
         run: go test ./... && sh packaging/macos/build-app.sh
       - name: Verify universal macOS binaries
         run: |

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-version="${FIBERPULSE_VERSION:-0.1.0-dev}"
+version="${FIBERPULSE_VERSION:-0.1.1-dev}"
 share_url="${FIBERPULSE_SHARE_URL:-}"
 update_feed_url="${FIBERPULSE_UPDATE_FEED_URL:-}"
 update_public_key="${FIBERPULSE_UPDATE_PUBLIC_KEY:-}"
