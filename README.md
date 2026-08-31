@@ -60,5 +60,8 @@ use the fake provider.
 
 ## License
 
-Apache-2.0. The FiberPulse name and third-party services are not licensed by
-this repository.
+Proprietary source-available license. The source code is visible for
+transparency and security review only; copying, modifying, redistributing or
+building derivative products requires a separate written agreement. See
+[LICENSE](LICENSE). The FiberPulse name and third-party services are not
+licensed by this repository.
