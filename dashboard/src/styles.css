@@ -213,6 +213,8 @@ footer { display: flex; justify-content: space-between; gap: 15px; padding: 24px
 .setting-row div { display: grid; gap: 3px; min-width: 0; }
 .setting-row b { font-size: .85rem; }
 .setting-row span { color: var(--muted); font-size: .7rem; }
+.setting-row .account-setting-error { color: #ffb2a8; max-width: 360px; font-size: .66rem; line-height: 1.4; }
+.setting-actions { display: grid !important; grid-auto-flow: column; align-items: center; gap: 8px !important; }
 .language-setting select { min-width: 180px; padding: 9px 34px 9px 11px; color: var(--text); background: #08182a; border: 1px solid var(--line); border-radius: 9px; font: inherit; font-size: .76rem; }
 .settings-note { margin: 18px 0 0; padding: 12px; color: #9cb0c3; background: #0a1a2d; border-radius: 9px; font-size: .69rem; text-align: center; }
 

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"fiberpulse.dev/agent/internal/accountsync"
 	"fiberpulse.dev/agent/internal/baseline"
 	"fiberpulse.dev/agent/internal/complaint"
 	"fiberpulse.dev/agent/internal/confidence"
@@ -41,6 +42,7 @@ const planSelectionSetting = "plan_selection_v1"
 const subscriberProfileSetting = "subscriber_profile_v1"
 const sharingIdentitySetting = "sharing_identity_v1"
 const interfaceLanguageSetting = "interface_language_v1"
+const accountConnectionSetting = "account_connection_v1"
 
 // PlanState exposes the subscriber's chosen ISP offer and, once a complete
 // measurement exists, how that measurement compares with the advertised plan.
@@ -75,47 +77,74 @@ type Config struct {
 	Logger                  *slog.Logger
 	Sponsor                 sponsor.Offer
 	Update                  *UpdateConfig
+	AccountAPIURL           string
+	OpenURL                 func(string) error
 }
 
 type App struct {
-	config        Config
-	store         *storage.Store
-	inspector     network.Inspector
-	health        health.Checker
-	local         *localapi.Server
-	scheduler     scheduler.Scheduler
-	schedulerMu   sync.Mutex
-	sharingMu     sync.Mutex
-	connectMu     sync.Mutex
-	ctx           context.Context
-	cancel        context.CancelFunc
-	mu            sync.RWMutex
-	lifecycle     LifecycleMachine
-	testMachine   measurement.TestMachine
-	schedule      scheduler.Machine
-	shareState    sharing.Machine
-	connectivity  health.ConnectivityMachine
-	paused        bool
-	nextRun       time.Time
-	lastHealth    health.Sample
-	lastError     string
-	incidentMu    sync.Mutex
-	incident      incidents.Machine
-	current       incidents.Record
-	testMu        sync.Mutex
-	testKind      scheduler.Kind
-	testProgress  measurement.Progress
-	updateClient  *update.Client
-	updateConfig  *UpdateConfig
-	updateNow     func() time.Time
-	updateMu      sync.Mutex
-	updateStatus  UpdateStatus
-	updatePending *pendingUpdate
-	wg            sync.WaitGroup
-	closing       bool
-	closeOnce     sync.Once
-	closeErr      error
-	shareWake     chan struct{}
+	config         Config
+	store          *storage.Store
+	inspector      network.Inspector
+	health         health.Checker
+	local          *localapi.Server
+	scheduler      scheduler.Scheduler
+	schedulerMu    sync.Mutex
+	sharingMu      sync.Mutex
+	connectMu      sync.Mutex
+	ctx            context.Context
+	cancel         context.CancelFunc
+	mu             sync.RWMutex
+	lifecycle      LifecycleMachine
+	testMachine    measurement.TestMachine
+	schedule       scheduler.Machine
+	shareState     sharing.Machine
+	connectivity   health.ConnectivityMachine
+	paused         bool
+	nextRun        time.Time
+	lastHealth     health.Sample
+	lastError      string
+	incidentMu     sync.Mutex
+	incident       incidents.Machine
+	current        incidents.Record
+	testMu         sync.Mutex
+	testKind       scheduler.Kind
+	testProgress   measurement.Progress
+	updateClient   *update.Client
+	updateConfig   *UpdateConfig
+	updateNow      func() time.Time
+	updateMu       sync.Mutex
+	updateStatus   UpdateStatus
+	updatePending  *pendingUpdate
+	wg             sync.WaitGroup
+	closing        bool
+	closeOnce      sync.Once
+	closeErr       error
+	shareWake      chan struct{}
+	accountClient  *accountsync.Client
+	accountMu      sync.Mutex
+	accountPairing bool
+}
+
+type persistedAccountConnection struct {
+	AccessToken        string    `json:"access_token,omitempty"`
+	Email              string    `json:"email,omitempty"`
+	Plan               string    `json:"plan,omitempty"`
+	SubscriptionStatus string    `json:"subscription_status,omitempty"`
+	GoogleLinked       bool      `json:"google_linked"`
+	LastSyncAt         time.Time `json:"last_sync_at,omitempty"`
+	LastError          string    `json:"last_error,omitempty"`
+}
+
+type AccountStatus struct {
+	Available          bool      `json:"available"`
+	Connected          bool      `json:"connected"`
+	Pairing            bool      `json:"pairing"`
+	Email              string    `json:"email,omitempty"`
+	Plan               string    `json:"plan,omitempty"`
+	SubscriptionStatus string    `json:"subscription_status,omitempty"`
+	GoogleLinked       bool      `json:"google_linked"`
+	LastSyncAt         time.Time `json:"last_sync_at,omitempty"`
+	LastError          string    `json:"last_error,omitempty"`
 }
 
 type persistedSharingIdentity struct {
@@ -150,6 +179,7 @@ type Snapshot struct {
 	Sponsor           *sponsor.Offer        `json:"sponsor,omitempty"`
 	LastError         string                `json:"last_error,omitempty"`
 	Update            UpdateStatus          `json:"update"`
+	Account           AccountStatus         `json:"account"`
 }
 
 type persistedIncidentRuntime struct {
@@ -230,6 +260,15 @@ func New(config Config) (*App, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("configure automatic updates: %w", err)
 	}
+	if config.AccountAPIURL != "" {
+		client, accountErr := accountsync.New(config.AccountAPIURL, nil)
+		if accountErr != nil {
+			cancel()
+			_ = store.Close()
+			return nil, fmt.Errorf("configure account synchronization: %w", accountErr)
+		}
+		a.accountClient = client
+	}
 	return a, nil
 }
 
@@ -275,6 +314,9 @@ func (a *App) Start() (string, error) {
 	}
 	if a.config.SharingTransport != nil {
 		a.runAsync(a.sharingLoop)
+	}
+	if a.accountClient != nil {
+		a.runAsync(a.accountSyncLoop)
 	}
 	a.config.Logger.Info("FiberPulse started", "dashboard", a.local.BaseURL(), "provider", a.config.Provider.Metadata().Name)
 	return a.local.BootstrapURL(), nil
@@ -371,6 +413,7 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 	connectivityState := a.connectivity.State()
 	a.connectMu.Unlock()
 	updateStatus := a.currentUpdateStatus()
+	accountStatus := a.accountStatus(ctx)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	var progress *measurement.Progress
@@ -383,7 +426,7 @@ func (a *App) Snapshot(ctx context.Context) (any, error) {
 		copy := a.config.Sponsor
 		sponsorOffer = &copy
 	}
-	return Snapshot{TestProgress: progress, Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), ConnectivityState: string(connectivityState), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Plan: planState, Complaint: complaintState, PlanCatalog: plan.Catalog(), Incidents: recentIncidents, Reports: recentReports, Sponsor: sponsorOffer, LastError: a.lastError, Update: updateStatus}, nil
+	return Snapshot{TestProgress: progress, Version: a.config.Version, State: string(a.lifecycle.State), TestState: string(a.testMachine.State), SchedulerState: string(a.schedule.State), ConnectivityState: string(connectivityState), Paused: a.paused, NextAutomaticTest: a.nextRun, Provider: a.config.Provider.Metadata(), MLabConsent: mlab, SharingConsent: sharing, SharingState: string(a.shareState.State), LastHealth: a.lastHealth, Measurements: results, ShareQueueCount: queue, SharingAvailable: a.config.SharingTransportEnabled, Baseline: personalBaseline, Plan: planState, Complaint: complaintState, PlanCatalog: plan.Catalog(), Incidents: recentIncidents, Reports: recentReports, Sponsor: sponsorOffer, LastError: a.lastError, Update: updateStatus, Account: accountStatus}, nil
 }
 
 func (a *App) currentComplaint(ctx context.Context, results []measurement.Result, planState *PlanState, now time.Time) (ComplaintState, error) {
@@ -456,6 +499,12 @@ func (a *App) Action(ctx context.Context, name string, raw json.RawMessage) erro
 		return a.CheckForUpdate(ctx)
 	case "update-install":
 		return a.ApplyUpdate(ctx)
+	case "account-connect":
+		return a.startAccountConnection(ctx)
+	case "account-disconnect":
+		return a.disconnectAccount(ctx)
+	case "account-sync":
+		return a.syncAccount(ctx)
 	case "pause":
 		var body struct {
 			Paused bool `json:"paused"`

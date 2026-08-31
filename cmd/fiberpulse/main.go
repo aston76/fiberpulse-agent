@@ -88,7 +88,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	agent, err := app.New(app.Config{Version: version, DatabasePath: filepath.Join(dataDir, "fiberpulse.db"), Provider: provider, ProbeURL: os.Getenv("FIBERPULSE_PROBE_URL"), DNSName: os.Getenv("FIBERPULSE_DNS_NAME"), SharingTransport: shareTransport, Sponsor: sponsorOffer, Logger: logger, Update: updateConfig})
+	accountOrigin := os.Getenv("FIBERPULSE_ACCOUNT_ORIGIN")
+	if accountOrigin == "" {
+		accountOrigin = "https://testspeednow.com"
+	}
+	agent, err := app.New(app.Config{Version: version, DatabasePath: filepath.Join(dataDir, "fiberpulse.db"), Provider: provider, ProbeURL: os.Getenv("FIBERPULSE_PROBE_URL"), DNSName: os.Getenv("FIBERPULSE_DNS_NAME"), SharingTransport: shareTransport, Sponsor: sponsorOffer, Logger: logger, Update: updateConfig, AccountAPIURL: accountOrigin, OpenURL: platform.OpenURL})
 	if err != nil {
 		return err
 	}
