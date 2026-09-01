@@ -109,13 +109,13 @@
       "name": "NBN 500",
       "download_mbps": 500,
       "upload_mbps": 50,
-      "price_amount": 88.99,
+      "price_amount": 69.99,
       "currency_code": "AUD",
       "price_period": "month",
       "category": "NBN FTTP/HFC",
-      "note": "Promotional price for the first 6 months, then about $108.99.",
+      "note": "Price locked for the first 12 months; new FTTP/HFC connections only; 500 Mbps typical evening speed (7–11 pm).",
       "source_url": "https://www.tpg.com.au/nbn",
-      "verified_at": "2026-08-30"
+      "verified_at": "2026-09-01"
     },
     {
       "id": "aussie-nbn-50",

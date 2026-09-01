@@ -154,13 +154,13 @@
       "name": "Full Fibre 150",
       "download_mbps": 150,
       "upload_mbps": 0,
-      "price_amount": 32.99,
+      "price_amount": 25.99,
       "currency_code": "GBP",
       "price_period": "month",
       "category": "Fiber (Openreach)",
-      "note": "EE is BT Group's consumer brand for new broadband sales; published average download; promotional price.",
+      "note": "24-month contract; £30 one-off activation; price rises to £29.99 in March 2027 and £33.99 in March 2028.",
       "source_url": "https://ee.co.uk/broadband",
-      "verified_at": "2026-08-30"
+      "verified_at": "2026-09-01"
     },
     {
       "id": "ee-full-fibre-500",
@@ -170,13 +170,13 @@
       "name": "Full Fibre 500",
       "download_mbps": 500,
       "upload_mbps": 0,
-      "price_amount": 34.99,
+      "price_amount": 29.99,
       "currency_code": "GBP",
       "price_period": "month",
       "category": "Fiber (Openreach)",
-      "note": "Published average download; promotional price.",
+      "note": "24-month contract; £10 one-off activation; price rises to £33.99 in March 2027 and £37.99 in March 2028.",
       "source_url": "https://ee.co.uk/broadband",
-      "verified_at": "2026-08-30"
+      "verified_at": "2026-09-01"
     },
     {
       "id": "ee-full-fibre-900",
@@ -186,13 +186,13 @@
       "name": "Full Fibre 900",
       "download_mbps": 900,
       "upload_mbps": 0,
-      "price_amount": 44.99,
+      "price_amount": 31.99,
       "currency_code": "GBP",
       "price_period": "month",
       "category": "Fiber (Openreach)",
-      "note": "Published average download; promotional price.",
+      "note": "24-month contract; £10 one-off activation; price rises to £35.99 in March 2027 and £39.99 in March 2028.",
       "source_url": "https://ee.co.uk/broadband",
-      "verified_at": "2026-08-30"
+      "verified_at": "2026-09-01"
     },
     {
       "id": "vodafone-full-fibre-150",
