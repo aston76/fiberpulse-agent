@@ -1,6 +1,6 @@
 # FiberPulse — passation complète et reprise du projet
 
-Dernière vérification opérationnelle : **31 août 2026, fuseau Asia/Manila**.
+Dernière vérification opérationnelle : **1er septembre 2026, fuseau Asia/Manila**.
 
 Ce fichier est la source de reprise principale. Une nouvelle conversation doit commencer par le lire, puis vérifier les états GitHub, DNS, o2switch et Store qui peuvent avoir changé depuis cette date.
 
@@ -30,7 +30,7 @@ Racine locale :
 
 Sous-projets :
 
-| Dossier | Rôle | Dépôt GitHub | Visibilité au 30/08/2026 |
+| Dossier | Rôle | Dépôt GitHub | Visibilité au 01/09/2026 |
 |---|---|---|---|
 | `fiberpulse-agent` | Application desktop, dashboard local, mesure, rapports, updater, packaging | `https://github.com/aston76/fiberpulse-agent` | Public, nécessaire aux téléchargements et mises à jour |
 | `fiberpulse-site` | Site produit `testspeednow.com` et déploiement o2switch | `https://github.com/aston76/fiberpulse-site` | Privé |
@@ -40,10 +40,10 @@ Sous-projets :
 Commits vérifiés au moment de cette passation :
 
 ```text
-fiberpulse-agent       30f6cd0 Checkout source before provisional release publish
-fiberpulse-site        b806504 Refresh static release hydration cache
-fiberpulse-platform    84aa882 Expand major ISP plan coverage
-fiberpulse-methodology ad89994 Document country-specific diagnostic guidance
+fiberpulse-agent       dfc22387e4a7 Synchronize account history across desktop clients (source exacte de v0.1.2)
+fiberpulse-site        ee0b8fbed7d2 Keep unreleased billing flows honest
+fiberpulse-platform    790dab2ed178
+fiberpulse-methodology 044ba06fca9a
 ```
 
 Le dossier non suivi `fiberpulse-agent/output/` contient des PDF générés. Il ne faut pas le committer par défaut.
@@ -57,6 +57,7 @@ Stack principale :
 - application macOS universelle `arm64 + x86_64` ;
 - Windows x64 avec édition Inno Setup directe et édition MSIX Store ;
 - stockage local-first ;
+- synchronisation privée et facultative de l’historique complet entre les applications Windows/macOS et le compte web ;
 - serveur d’interface uniquement sur loopback ;
 - aucun runtime Node, Python ou WebView requis dans l’application macOS distribuée.
 
@@ -81,6 +82,17 @@ docs/MACOS-DISTRIBUTION.md   distribution macOS
 .github/workflows/ci.yml     CI générale
 .github/workflows/release.yml signature, notarisation et releases
 ```
+
+### 3.1 Compte et synchronisation multi-appareils
+
+- L’application reste entièrement utilisable sans compte et enregistre d’abord chaque résultat dans sa base locale.
+- Quand l’utilisateur relie un compte, les applications Windows et macOS envoient les résultats locaux absents du compte, récupèrent les résultats complets des autres appareils et les insèrent sans écraser un original local.
+- Le site affiche le même historique scalaire. Les champs de compte `email`, `plan`, `subscriptionStatus` et l’état de liaison Google sont partagés avec les applications.
+- Les noms d’interface réseau, identifiants de route et détails d’erreur locaux sont retirés avant synchronisation. Une copie téléchargée ne peut pas être repartagée vers l’observatoire public.
+- Le profil abonné détaillé (adresse, référence client, équipements, contact) et les rapports PDF/CSV restent locaux à chaque appareil par choix de confidentialité. Ne jamais annoncer leur synchronisation tant que ce contrat n’a pas été explicitement revu.
+- La suppression de compte exige une confirmation explicite, supprime en cascade les sessions web, liaisons d’appareils, jetons et mesures synchronisées, puis rend l’adresse de nouveau disponible.
+- Le test d’intégration `fiberpulse-site/scripts/test-account-api.sh` prouve le parcours web, deux appareils distincts, enrichissement d’une ancienne ligne scalaire, résultat complet sans identifiant d’interface, déduplication et suppression en cascade.
+- Le parcours de production a aussi été exécuté le 01/09/2026 avec un compte jetable : création, liaison de deux clients représentant macOS et Windows, transfert d’un résultat complet, lecture dans l’historique web, absence des champs privés, suppression du compte et révocation des deux jetons. Le compte de test a été supprimé à la fin.
 
 ## 4. Mesures, consentements et limites
 
@@ -134,7 +146,9 @@ L’édition MSIX Store :
 - est mise à jour par Microsoft Store ;
 - ne contient volontairement pas le helper d’auto-update autonome.
 
-Paquet Store préparé :
+Le pipeline CI construit et vérifie actuellement un MSIX de version **0.1.2.0**. Il ne doit pas être présenté comme publié tant que la certification Store n’a pas été relue en direct.
+
+Ancien paquet Store préparé, conservé uniquement comme historique :
 
 ```text
 FiberPulse-0.1.0.0-windows-x64.msix
@@ -161,7 +175,7 @@ Le pipeline actuel refuse correctement de présenter un build Windows direct non
 
 ### 5.4 macOS sans abonnement Apple — décision actuelle
 
-Décision produit au 30/08/2026 : **ne pas payer immédiatement l’Apple Developer Program**. Publier éventuellement le ZIP macOS directement sur le site avec une courte documentation d’ouverture, puis attendre avant le Mac App Store et la notarisation.
+Décision produit maintenue au 01/09/2026 : **ne pas payer immédiatement l’Apple Developer Program**. Le ZIP macOS est publié directement sur le site avec une courte documentation d’ouverture ; le Mac App Store et la notarisation attendent les identifiants Apple requis.
 
 État technique vérifié de l’application locale :
 
@@ -195,20 +209,20 @@ Quand l’abonnement Apple sera acheté, renseigner les secrets de `release.yml`
 
 ### 5.5 État actuel des releases
 
-La release publique `v0.1.0` est publiée :
+La release publique `v0.1.2` est publiée :
 
 ```text
-https://github.com/aston76/fiberpulse-agent/releases/tag/v0.1.0
+https://github.com/aston76/fiberpulse-agent/releases/tag/v0.1.2
 ```
 
-Elle contient le ZIP macOS universel, la notice d’installation et `SHA256SUMS`. L’archive publique téléchargée depuis GitHub a été revérifiée : hashes valides, structure `codesign` valide, signature ad hoc sans TeamIdentifier, URL de partage de production présente, feed d’auto-update absent, démarrage et arrêt complet réussis. Gatekeeper la rejette normalement comme développeur non identifié ; le site et la notice le disent explicitement.
+Elle contient `FiberPulse-0.1.2-macos.zip`, l’alias `FiberPulse-macos-universal.zip`, la notice d’installation et `SHA256SUMS`. L’archive exacte téléchargée depuis GitHub a été revérifiée : hashes valides, architectures `x86_64 arm64`, version `0.1.2`, build `4`, structure `codesign` valide, signature ad hoc sans notarisation, démarrage réel avec serveur loopback puis arrêt complet par `--quit` avec code 0. Gatekeeper la rejette normalement comme développeur non identifié ; le site et la notice le disent explicitement. Les mises à jour automatiques restent désactivées dans cette édition.
 
 Le workflow propose désormais deux modes séparés :
 
 - `macos-provisional`, pour publier uniquement le ZIP Mac manuel non notarialisé ;
 - `full-signed`, réservé aux artefacts Windows Authenticode et macOS Developer ID/notarisés.
 
-Windows n’est pas proposé en téléchargement direct non signé. La soumission MSIX du produit `9N3XLBSX2MPL` est réellement à l’étape **3/4 — en cours de certification** dans Partner Center. Attendre la décision Microsoft ; ne pas contourner ce contrôle avec un installateur public non signé.
+Windows n’est pas proposé en téléchargement direct non signé. La CI `33449644686` a construit l’EXE natif, vérifié le MSIX, compilé l’installateur Inno Setup, puis installé, lancé, quitté et désinstallé cet installateur sur Windows avec succès. Cela prouve le logiciel et le packaging, pas une signature Authenticode ni une publication Store. L’ancien statut Partner Center « 3/4 — en cours de certification » n’a pas été relu dans cette vérification et doit être considéré comme potentiellement obsolète. Ne pas contourner ce contrôle avec un installateur public non signé.
 
 ## 6. Site public et déploiement
 
@@ -254,7 +268,7 @@ CPANEL_TOKEN
 Dernier déploiement GitHub Actions vérifié avant cette mise à jour documentaire :
 
 ```text
-https://github.com/aston76/fiberpulse-site/actions/runs/33328210855
+https://github.com/aston76/fiberpulse-site/actions/runs/33452544302
 ```
 
 Chaque push sur `fiberpulse-site/main` lance lint, build, export o2switch, upload ciblé dans le docroot et vérification du virtual host.
@@ -269,7 +283,7 @@ Il ne doit plus être confondu avec le domaine final.
 
 ### État DNS/HTTPS à la dernière vérification
 
-État vérifié le 31/08/2026 :
+État revérifié le 01/09/2026 :
 
 ```text
 NS publics: ns1.o2switch.net, ns2.o2switch.net
@@ -289,12 +303,20 @@ curl -I https://testspeednow.com/
 
 L’A doit être `109.234.160.138` et `curl` doit réussir sans `-k`.
 
+### Compte, interface et facturation servie
+
+- `/v1/account/health` répond avec `status: ok`, `storage: true` et `google: true`.
+- `/v1/account/delete` existe en production, impose une origine autorisée et une session authentifiée, puis exige l’adresse e-mail exacte comme confirmation.
+- Les pages produit, compte et tarifs ont été relues dans le navigateur public à 320 et 1280 px. Le contrôle mobile final ne montre aucun débordement horizontal ; la création de compte, l’état connecté, l’historique vide et la suppression ont été vérifiés sur l’interface réellement servie.
+- Le script statique du compte est actuellement cache-busté par `/account-static.js?v=6`.
+- La facturation Stripe n’est **pas encore active**. Les formules Pro et leurs prix sont une prévisualisation, les actions de paiement sont désactivées et aucune offre payante n’est annoncée comme achetable dans les données structurées. Ne réactiver le paiement qu’après configuration Stripe, test des webhooks, vérification du parcours complet et revue des textes contractuels.
+
 ## 7. Téléchargements affichés sur le site
 
 Le composant `fiberpulse-site/components/release-downloads.tsx` appelle :
 
 ```text
-/api/release?v=3
+/api/release?v=4
 ```
 
 Le proxy vérifie la dernière release `aston76/fiberpulse-agent` et sait exposer chaque plateforme indépendamment :
@@ -304,7 +326,7 @@ FiberPulse-macos-universal.zip
 FiberPulse-windows-x64-setup.exe (uniquement après signature complète)
 ```
 
-Au 31/08/2026, l’API publie `v0.1.0` avec `macos` disponible et `windows: null`. Les cartes localisées distinguent clairement :
+Au 01/09/2026, l’API publie `v0.1.2`, `releaseKind: provisional`, `automaticUpdates: false`, avec `macos` disponible et `windows: null`. Les cartes localisées distinguent clairement :
 
 - Windows signé/Store ;
 - Mac téléchargement provisoire non notarialisé avec documentation manuelle ;
@@ -414,18 +436,18 @@ Relire le workflow avant de créer les secrets : les noms exacts peuvent évolue
 Dernière CI agent vérifiée comme réussie :
 
 ```text
-https://github.com/aston76/fiberpulse-agent/actions/runs/33326921416
+https://github.com/aston76/fiberpulse-agent/actions/runs/33449644686
 ```
 
 Release macOS provisoire vérifiée comme réussie :
 
 ```text
-https://github.com/aston76/fiberpulse-agent/actions/runs/33326922499
+https://github.com/aston76/fiberpulse-agent/actions/runs/33449925051
 ```
 
 Une réussite CI locale ou sur une ancienne archive ne suffit pas pour publier. Vérifier l’artefact exact produit par la dernière exécution réussie.
 
-Les deux anciennes instabilités liées aux horodatages SQLite ont été corrigées : l’ordre des consentements utilise l’ordre d’insertion et la première tentative de partage reste exigible même en cas de recul de l’horloge. Les matrices macOS 14/15 et Windows sont vertes sur le run ci-dessus.
+Les deux anciennes instabilités liées aux horodatages SQLite ont été corrigées : l’ordre des consentements utilise l’ordre d’insertion et la première tentative de partage reste exigible même en cas de recul de l’horloge. Les matrices macOS 14/15 et Windows sont vertes sur le run ci-dessus. Le même run couvre aussi `go test -race`, le dashboard embarqué exact, les contrôles statiques et de vulnérabilités, les builds Windows/macOS, le MSIX et le cycle install/run/quit/uninstall Windows.
 
 ## 13. Prochaines actions, dans l’ordre
 
@@ -433,7 +455,8 @@ Les deux anciennes instabilités liées aux horodatages SQLite ont été corrig�
 2. Après validation Store, vérifier la fiche publique, l’installation, le bouton Quit et la mise à jour Microsoft Store sur un Windows 10/11 réel.
 3. Ne publier l’installateur Windows direct qu’après signature Authenticode et essai réel ancienne version → mise à jour → reçu de santé → historique conservé.
 4. Garder l’auto-update Mac public désactivé tant qu’Apple Developer ID et la notarisation ne sont pas disponibles.
-5. Effectuer une revue juridique par pays avant toute promesse marketing fondée sur une règle réglementaire ou contractuelle.
+5. Configurer Stripe seulement quand les clés, produits, prix et webhooks de production sont disponibles ; tester paiement, renouvellement, échec, résiliation et remboursement avant de réactiver les boutons Pro.
+6. Effectuer une revue juridique par pays avant toute promesse marketing fondée sur une règle réglementaire ou contractuelle.
 
 ## 14. Extension multi-pays (réalisée le 30/08/2026)
 
@@ -490,4 +513,7 @@ Ne considérer la distribution comme terminée que si :
 - l’update Windows est prouvé depuis une installation antérieure ;
 - le parcours Mac décrit honnêtement l’avertissement Gatekeeper ;
 - aucune donnée personnelle n’apparaît dans l’observatoire public ;
+- un même compte retrouve sans doublon ses mesures complètes entre Windows, macOS et le web, sans champs réseau privés ;
+- la suppression d’un compte révoque toutes ses sessions et liaisons d’appareils ;
+- aucun paiement Pro n’est activé avant la validation de Stripe et du parcours contractuel ;
 - le bouton Quit ferme l’interface, l’agent, le serveur loopback et les tâches en arrière-plan.
